@@ -1,13 +1,115 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
-const {
-    generateQuestionsForCourse,
-    generateQuestionsForStream
-} = require("../Generator");
+const { generateQuestionsForCourse } = require("../Generator");
+const util = require("util");
+const queryAsync = util.promisify(db.query).bind(db);
 
 const WALKIN_STREAMS = ["Data Science", "Data Analytics", "MERN"];
 const WALKIN_STREAMS_SQL = WALKIN_STREAMS.map((stream) => `'${stream}'`).join(", ");
+
+async function loadWalkinQuestionSet(stream) {
+    const aptitudeRows = await queryAsync(`
+        SELECT question_text, option_a, option_b, option_c, option_d, correct_option
+        FROM walkin_aptitude_questions
+        ORDER BY question_id
+    `);
+    const streamRows = await queryAsync(
+        `
+        SELECT question_text, section_name, question_type
+        FROM walkin_stream_questions
+        WHERE stream = ?
+        ORDER BY question_id
+        `,
+        [stream]
+    );
+    const codingRows = await queryAsync(
+        `SELECT question_text FROM walkin_coding_questions ORDER BY question_id`
+    );
+
+    if (!aptitudeRows.length) {
+        throw new Error("Walk-in aptitude question bank is empty");
+    }
+
+    const result = [];
+    aptitudeRows.forEach((row) => {
+        result.push({
+            section_name: "Aptitude",
+            question_type: "MCQ",
+            question_text: row.question_text,
+            option_a: row.option_a || "",
+            option_b: row.option_b || "",
+            option_c: row.option_c || "",
+            option_d: row.option_d || "",
+            correct_answer: row.correct_option || null
+        });
+    });
+
+    streamRows.forEach((row) => {
+        result.push({
+            section_name: row.section_name || "Theory",
+            question_type: row.question_type || "Descriptive",
+            question_text: row.question_text,
+            option_a: "",
+            option_b: "",
+            option_c: "",
+            option_d: "",
+            correct_answer: null
+        });
+    });
+
+    codingRows.forEach((row) => {
+        result.push({
+            section_name: "Coding",
+            question_type: "Coding",
+            question_text: row.question_text,
+            option_a: "",
+            option_b: "",
+            option_c: "",
+            option_d: "",
+            correct_answer: null
+        });
+    });
+
+    return result;
+}
+
+async function seedWalkinExamQuestions(examId, stream) {
+    if (!stream) {
+        throw new Error("Walk-in stream is required to seed questions");
+    }
+    const questions = await loadWalkinQuestionSet(stream);
+    if (!questions.length) {
+        throw new Error("Walk-in question set for the stream is empty");
+    }
+
+    await queryAsync(`DELETE FROM questions WHERE exam_id = ?`, [examId]);
+
+    const insertSql = `
+        INSERT INTO questions
+        (question_text, option_a, option_b, option_c, option_d, correct_answer, section_name, question_type, exam_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    for (const question of questions) {
+        await queryAsync(insertSql, [
+            question.question_text,
+            question.option_a || "",
+            question.option_b || "",
+            question.option_c || "",
+            question.option_d || "",
+            question.correct_answer || null,
+            question.section_name || "General",
+            question.question_type || "MCQ",
+            examId
+        ]);
+    }
+
+    await queryAsync(
+        `UPDATE exams SET exam_status = 'READY' WHERE exam_id = ?`,
+        [examId]
+    );
+}
 
 function ensureStudentTypeColumn() {
     const query = `
@@ -42,6 +144,46 @@ function ensureStudentTypeColumn() {
 }
 
 ensureStudentTypeColumn();
+
+function ensureQuestionColumns() {
+    const required = {
+        section_name: "VARCHAR(128) NOT NULL DEFAULT 'General'",
+        question_type: "ENUM('MCQ','Descriptive','Coding') NOT NULL DEFAULT 'MCQ'"
+    };
+
+    db.query(
+        `
+            SELECT COLUMN_NAME
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE table_schema = DATABASE()
+              AND table_name = 'questions'
+              AND column_name IN ('section_name', 'question_type')
+        `,
+        (err, rows) => {
+            if (err) {
+                console.error("Question schema check failed:", err);
+                return;
+            }
+
+            const existing = new Set((rows || []).map((row) => row.COLUMN_NAME));
+            Object.entries(required).forEach(([column, definition]) => {
+                if (existing.has(column)) return;
+                db.query(
+                    `ALTER TABLE questions ADD COLUMN ${column} ${definition}`,
+                    (alterErr) => {
+                        if (alterErr) {
+                            console.error(`Could not add ${column} column:`, alterErr);
+                        } else {
+                            console.log(`Added ${column} column to questions table`);
+                        }
+                    }
+                );
+            });
+        }
+    );
+}
+
+ensureQuestionColumns();
 
 /* ================= ADMIN LOGIN API ================= */
 router.post("/login", (req, res) => {
@@ -325,6 +467,7 @@ router.get("/results/:collegeId", (req, res) => {
         `
         SELECT r.result_id,
                r.student_id,
+               s.name AS student_name,
                r.exam_id,
                r.attempt_status,
                r.total_marks,
@@ -346,6 +489,7 @@ router.get("/results/:collegeId", (req, res) => {
         FROM results r
         JOIN exams e ON e.exam_id = r.exam_id
         JOIN exam_event ev ON ev.event_id = e.event_id
+        JOIN students s ON s.student_id = r.student_id
         LEFT JOIN (
             SELECT sa.student_id,
                    sa.exam_id,
@@ -449,9 +593,14 @@ router.get("/students/:collegeId", (req, res) => {
 /* ================= WALK-IN STUDENT CREATION ================= */
 router.post("/students/walkin", (req, res) => {
     const { name, email, phone, dob, course } = req.body;
+    const collegeId = req.session?.admin?.collegeId;
 
     if (!name || !email || !phone || !dob || !course) {
         return res.status(400).json({ success: false, message: "Missing required walk-in details" });
+    }
+
+    if (!collegeId) {
+        return res.status(500).json({ success: false, message: "Missing college context" });
     }
 
     db.query(
@@ -473,7 +622,7 @@ router.post("/students/walkin", (req, res) => {
                 (name, email_id, contact_number, dob, course, college_id, student_type)
                 VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN')
                 `,
-                [name, email, phone, dob, course.trim(), 1],
+                [name.trim(), email.trim(), phone.trim(), dob, course.trim(), collegeId],
                 (err2) => {
                     if (err2) {
                         console.error("Walk-in insert error:", err2);
@@ -484,6 +633,91 @@ router.post("/students/walkin", (req, res) => {
                         success: true,
                         credentials: { studentId: email }
                     });
+                }
+            );
+        }
+    );
+});
+
+/* ================= REGULAR STUDENT CREATION ================= */
+router.post("/students/regular", (req, res) => {
+    const collegeId = req.session?.admin?.collegeId;
+    const {
+        name,
+        email,
+        phone,
+        dob,
+        course,
+        collegeId: payloadCollegeId,
+        password
+    } = req.body;
+
+    if (!collegeId) {
+        return res.status(500).json({ success: false, message: "Missing college context" });
+    }
+
+    const cleanName = String(name || "").trim();
+    const cleanEmail = String(email || "").trim();
+    const cleanPhone = String(phone || "").trim();
+    const cleanDob = String(dob || "").trim();
+    const cleanCourse = String(course || "").trim();
+    const cleanPassword = String(password || "");
+    const selectedCollegeId = String(payloadCollegeId || collegeId).trim();
+
+    if (!cleanName || !cleanEmail || !cleanPhone || !cleanDob || !cleanCourse || !selectedCollegeId || !cleanPassword) {
+        return res.status(400).json({ success: false, message: "Missing required regular student details" });
+    }
+
+    if (String(selectedCollegeId) !== String(collegeId)) {
+        return res.status(403).json({ success: false, message: "Cannot add students to another college" });
+    }
+
+    db.query(
+        `SELECT student_id FROM students WHERE email_id = ?`,
+        [cleanEmail],
+        (err, rows) => {
+            if (err) {
+                console.error("Regular student lookup error:", err);
+                return res.status(500).json({ success: false, message: "Server error" });
+            }
+
+            if (rows.length > 0) {
+                return res.status(400).json({ success: false, message: "Email already registered" });
+            }
+
+            db.query(
+                `
+                INSERT INTO students
+                (name, email_id, contact_number, dob, course, college_id, student_type)
+                VALUES (?, ?, ?, ?, ?, ?, 'REGULAR')
+                `,
+                [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, selectedCollegeId],
+                (err2, result) => {
+                    if (err2) {
+                        console.error("Regular student insert error:", err2);
+                        return res.status(500).json({ success: false, message: "Could not create regular student" });
+                    }
+
+                    const newStudentId = result?.insertId;
+                    db.query(
+                        `
+                        INSERT INTO student_credentials
+                        (student_id, password)
+                        VALUES (?, ?)
+                        `,
+                        [newStudentId, cleanPassword],
+                        (err3) => {
+                            if (err3) {
+                                console.error("Regular credentials error:", err3);
+                                return res.status(500).json({ success: false, message: "Could not save credentials" });
+                            }
+
+                            res.json({
+                                success: true,
+                                credentials: { studentId: newStudentId }
+                            });
+                        }
+                    );
                 }
             );
         }
@@ -606,6 +840,26 @@ router.post("/exam", (req, res) => {
                         console.error("Create exam error:", err2);
                         return res.json({ success: false });
                     }
+                    if (eventType === "WALKIN") {
+                        db.query(
+                            `SELECT exam_id FROM exams WHERE event_id = ? AND course = ?`,
+                            [event_id, payloadValue],
+                            (err3, examRows) => {
+                                if (err3 || !examRows || examRows.length === 0) {
+                                    console.error("Walk-in exam lookup error:", err3);
+                                    return res.status(500).json({ success: false, message: "Could not identify exam" });
+                                }
+                                const examId = examRows[0].exam_id;
+                                seedWalkinExamQuestions(examId, payloadValue)
+                                    .then(() => res.json({ success: true }))
+                                    .catch((seedErr) => {
+                                        console.error("Walk-in question seed error:", seedErr);
+                                        res.status(500).json({ success: false, message: "Could not seed walk-in questions" });
+                                    });
+                            }
+                        );
+                        return;
+                    }
                     res.json({ success: true });
                 }
             );
@@ -657,6 +911,23 @@ router.post("/generate-questions/:examId", async (req, res) => {
 
             const eventType = (rows[0].event_type || "REGULAR").toUpperCase();
             const sourceValue = String(rows[0].course || "").trim();
+            const isWalkinEvent = eventType === "WALKIN";
+            let walkinPreset = [];
+            if (isWalkinEvent) {
+                try {
+                    walkinPreset = await loadWalkinQuestionSet(sourceValue);
+                } catch (loadErr) {
+                    console.error("Walk-in question load error:", loadErr);
+                    return res.json({ success: false, message: "Walk-in question bank is not configured" });
+                }
+            }
+
+            if (isWalkinEvent && walkinPreset.length === 0) {
+                return res.json({
+                    success: false,
+                    message: "This walk-in stream has no predefined question set."
+                });
+            }
 
             if (!sourceValue) {
                 return res.json({
@@ -666,15 +937,14 @@ router.post("/generate-questions/:examId", async (req, res) => {
             }
 
             try {
-                const questions =
-                    eventType === "WALKIN"
-                        ? await generateQuestionsForStream(sourceValue, questionCount)
-                        : await generateQuestionsForCourse(sourceValue, questionCount);
+                const questions = isWalkinEvent
+                    ? walkinPreset
+                    : await generateQuestionsForCourse(sourceValue, questionCount);
 
                 const insertSql = `
                     INSERT INTO questions
-                    (question_text, option_a, option_b, option_c, option_d, correct_answer, exam_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (question_text, option_a, option_b, option_c, option_d, correct_answer, section_name, question_type, exam_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `;
 
                 for (const q of questions) {
@@ -688,6 +958,8 @@ router.post("/generate-questions/:examId", async (req, res) => {
                                 q.option_c,
                                 q.option_d,
                                 q.correct_answer,
+                                q.section_name || "General",
+                                q.question_type || "MCQ",
                                 examId
                             ],
                             err => (err ? reject(err) : resolve())

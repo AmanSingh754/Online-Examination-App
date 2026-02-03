@@ -1,6 +1,9 @@
 const express = require("express");
 const router = express.Router();
 const db = require("../db");
+const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
 
 router.use((req, res, next) => {
     if (req.method === "OPTIONS") {
@@ -12,6 +15,68 @@ router.use((req, res, next) => {
     }
     next();
 });
+
+const CODE_RUNNERS = {
+    python: { command: "python", ext: ".py" },
+    javascript: { command: "node", ext: ".js" }
+};
+const TEMP_CODE_DIR = path.join(__dirname, "../tmp-code");
+
+const runCodeWithRunner = async (language, code, input = "") => {
+    const runner = CODE_RUNNERS[language];
+    if (!runner) {
+        throw new Error("Unsupported language");
+    }
+    await fs.promises.mkdir(TEMP_CODE_DIR, { recursive: true });
+    const filename = `code-${Date.now()}-${Math.random().toString(36).slice(2)}${runner.ext}`;
+    const filepath = path.join(TEMP_CODE_DIR, filename);
+    await fs.promises.writeFile(filepath, code, { encoding: "utf8" });
+
+    return await new Promise((resolve, reject) => {
+        const child = spawn(runner.command, [filepath], {
+            cwd: TEMP_CODE_DIR,
+            env: process.env,
+            stdio: ["pipe", "pipe", "pipe"]
+        });
+        if (input) {
+            child.stdin.write(input);
+        }
+        child.stdin.end();
+
+        let stdout = "";
+        let stderr = "";
+        let timedOut = false;
+        const timeoutMs = 5000;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            child.kill();
+        }, timeoutMs);
+
+        child.stdout.on("data", (chunk) => {
+            stdout += chunk.toString("utf8");
+        });
+        child.stderr.on("data", (chunk) => {
+            stderr += chunk.toString("utf8");
+        });
+
+        child.on("error", (err) => {
+            clearTimeout(timer);
+            fs.promises.unlink(filepath).catch(() => {});
+            reject(err);
+        });
+
+        child.on("close", (code) => {
+            clearTimeout(timer);
+            fs.promises.unlink(filepath).catch(() => {});
+            resolve({
+                stdout: stdout.trim(),
+                stderr: stderr.trim(),
+                timedOut,
+                exitCode: code
+            });
+        });
+    });
+};
 
 /* ================= CHECK ATTEMPT ================= */
 router.get("/attempted/:studentId/:examId", (req, res) => {
@@ -32,14 +97,51 @@ router.get("/attempted/:studentId/:examId", (req, res) => {
 /* ================= FETCH QUESTIONS ================= */
 router.get("/questions/:examId", (req, res) => {
     db.query(
-        `SELECT question_id, question_text, option_a, option_b, option_c, option_d
-         FROM questions WHERE exam_id = ?`,
+        `
+        SELECT 
+            question_id,
+            question_text,
+            option_a,
+            option_b,
+            option_c,
+            option_d,
+            section_name,
+            question_type
+        FROM questions
+        WHERE exam_id = ?
+        ORDER BY question_id
+        `,
         [req.params.examId],
         (err, rows) => {
             if (err) return res.json([]);
             res.json(rows);
         }
     );
+});
+
+router.post("/run-code", async (req, res) => {
+    if (!req.session?.student) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const { language, code, input } = req.body || {};
+    if (!language || !code) {
+        return res.status(400).json({ success: false, message: "Missing language or code" });
+    }
+
+    try {
+        const result = await runCodeWithRunner(language, code, input);
+        return res.json({
+            success: true,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            timedOut: result.timedOut,
+            exitCode: result.exitCode
+        });
+    } catch (err) {
+        console.error("Code runner error:", err);
+        return res.status(500).json({ success: false, message: err.message || "Execution failed" });
+    }
 });
 
 /* ================= SUBMIT EXAM ================= */

@@ -65,7 +65,6 @@ router.post("/login", (req, res) => {
 router.post("/register", (req, res) => {
     const {
         name,
-        studentId,
         email,
         phone,
         dob,
@@ -74,13 +73,21 @@ router.post("/register", (req, res) => {
         password
     } = req.body;
 
-    if (!name || !studentId || !email || !phone || !dob || !course || !collegeId || !password) {
+    const cleanName = String(name || "").trim();
+    const cleanEmail = String(email || "").trim();
+    const cleanPhone = String(phone || "").trim();
+    const cleanDob = String(dob || "").trim();
+    const cleanCourse = String(course || "").trim();
+    const cleanCollegeId = String(collegeId || "").trim();
+    const cleanPassword = String(password || "");
+
+    if (!cleanName || !cleanEmail || !cleanPhone || !cleanDob || !cleanCourse || !cleanCollegeId || !cleanPassword) {
         return res.json({ success: false, message: "Missing required fields" });
     }
 
     db.query(
-        `SELECT student_id FROM students WHERE student_id = ? OR email_id = ?`,
-        [studentId, email],
+        `SELECT student_id FROM students WHERE email_id = ?`,
+        [cleanEmail],
         (err, rows) => {
             if (err) {
                 console.error("Register lookup error:", err);
@@ -88,39 +95,57 @@ router.post("/register", (req, res) => {
             }
 
             if (rows.length > 0) {
-                return res.json({ success: false, message: "Student already exists" });
+                return res.json({ success: false, message: "Email already registered" });
             }
 
             db.query(
                 `
                 INSERT INTO students
-                (student_id, name, email_id, contact_number, dob, course, college_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (name, email_id, contact_number, dob, course, college_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 `,
-                [studentId, name, email, phone, dob, course, collegeId],
-                (err2) => {
+                [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, cleanCollegeId],
+                (err2, result) => {
                     if (err2) {
                         console.error("Register student error:", err2);
                         return res.json({ success: false, message: "Registration failed" });
                     }
 
+                    const newStudentId = result?.insertId;
                     db.query(
                         `
                         INSERT INTO student_credentials
                         (student_id, password)
                         VALUES (?, ?)
                         `,
-                        [studentId, password],
+                        [newStudentId, cleanPassword],
                         (err3) => {
                             if (err3) {
                                 console.error("Register credentials error:", err3);
                                 return res.json({ success: false, message: "Registration failed" });
                             }
-                            res.json({ success: true });
+                            res.json({ success: true, studentId: newStudentId });
                         }
                     );
                 }
             );
+        }
+    );
+});
+
+router.get("/colleges", (req, res) => {
+    db.query(
+        `
+        SELECT college_id, college_name
+        FROM college
+        ORDER BY college_name
+        `,
+        (err, rows) => {
+            if (err) {
+                console.error("College list error:", err);
+                return res.json([]);
+            }
+            res.json(Array.isArray(rows) ? rows : []);
         }
     );
 });

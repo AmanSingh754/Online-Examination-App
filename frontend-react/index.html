@@ -14,6 +14,19 @@
   </head>
   <body>
     <div id="root"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs/loader.min.js"></script>
+    <script>
+      window.monacoLoaded = new Promise((resolve) => {
+        require.config({
+          paths: {
+            vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.0/min/vs"
+          }
+        });
+        require(["vs/editor/editor.main"], () => {
+          resolve();
+        });
+      });
+    </script>
     <script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>

@@ -4,6 +4,7 @@ import AdminLogin from "./pages/AdminLogin.jsx";
 import StudentLogin from "./pages/StudentLogin.jsx";
 import Register from "./pages/Register.jsx";
 import AdminDashboard from "./pages/AdminDashboard.jsx";
+import AdminResultReview from "./pages/AdminResultReview.jsx";
 import StudentDashboard from "./pages/StudentDashboard.jsx";
 import Exam from "./pages/Exam.jsx";
 import Result from "./pages/Result.jsx";
@@ -19,6 +20,7 @@ function App() {
       <Route path="/register" element={<Register />} />
       <Route path="/admin/dashboard" element={<AdminDashboard />} />
       <Route path="/student/dashboard" element={<StudentDashboard />} />
+      <Route path="/admin/result-review" element={<AdminResultReview />} />
       <Route path="/exam" element={<Exam />} />
       <Route path="/result" element={<Result />} />
       <Route path="*" element={<Navigate to="/" replace />} />

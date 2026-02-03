@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 
 const REGULAR_COURSES = [
@@ -18,6 +18,7 @@ const WALKIN_STREAMS = ["Data Science", "Data Analytics", "MERN"];
 function AdminDashboard() {
   useBodyClass("dashboard admin-dashboard");
 
+  const location = useLocation();
   const navigate = useNavigate();
   const adminId = localStorage.getItem("adminId");
   const collegeId = localStorage.getItem("collegeId");
@@ -37,8 +38,6 @@ function AdminDashboard() {
   const [selectedEventId, setSelectedEventId] = useState("");
   const [selectedExamId, setSelectedExamId] = useState("");
   const [questionCount, setQuestionCount] = useState("");
-  const [activeResultDetail, setActiveResultDetail] = useState(null);
-  const [detailLoading, setDetailLoading] = useState(false);
 
   const [eventName, setEventName] = useState("");
   const [eventStartDate, setEventStartDate] = useState("");
@@ -66,8 +65,30 @@ function AdminDashboard() {
     password: ""
   });
   const [walkinPasswordStatus, setWalkinPasswordStatus] = useState("");
+  const [regularForm, setRegularForm] = useState({
+    name: "",
+    email: "",
+    phone: "",
+    dob: "",
+    course: "",
+    collegeId: collegeId || "",
+    password: ""
+  });
+  const [regularStatus, setRegularStatus] = useState("");
+  const [regularCredentials, setRegularCredentials] = useState(null);
+  const [collegeOptions, setCollegeOptions] = useState([]);
+  const [collegeError, setCollegeError] = useState("");
+  const landingSection = location.state?.activeSection;
+
+  useEffect(() => {
+    if (!landingSection) return;
+    setShowProfile(false);
+    setActiveSection(landingSection);
+    navigate(`${location.pathname}${location.search}`, { replace: true, state: undefined });
+  }, [landingSection, location.pathname, location.search, navigate]);
   const [revealedPasswords, setRevealedPasswords] = useState({});
   const [generatedExamId, setGeneratedExamId] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   const selectedEvent = events.find(
     (event) => String(event.event_id) === String(selectedEventId)
@@ -75,11 +96,13 @@ function AdminDashboard() {
   const selectedEventType = (
     (selectedEvent?.event_type || "REGULAR") + ""
   ).toUpperCase();
+  const isWalkinEventSelected = selectedEventType === "WALKIN";
 
   const eventChartRef = useRef(null);
   const examChartRef = useRef(null);
   const studentChartRef = useRef(null);
   const chartsRef = useRef({ event: null, exam: null, student: null });
+  const activeSectionRef = useRef(activeSection);
 
   useEffect(() => {
     if (!adminId || !collegeId) {
@@ -93,6 +116,41 @@ function AdminDashboard() {
     loadRecentResults();
     loadStudents();
   }, [adminId, collegeId, navigate]);
+
+  useEffect(() => {
+    const loadColleges = async () => {
+      try {
+        const response = await fetch("/student/colleges");
+        const data = await response.json();
+        if (!Array.isArray(data) || data.length === 0) {
+          setCollegeOptions([]);
+          setCollegeError("No colleges available yet.");
+          return;
+        }
+        setCollegeOptions(data);
+        setCollegeError("");
+        setRegularForm((prev) => ({
+          ...prev,
+          collegeId: prev.collegeId || String(collegeId || data[0].college_id)
+        }));
+      } catch (err) {
+        console.error("College load error:", err);
+        setCollegeError("Could not load colleges.");
+      }
+    };
+    loadColleges();
+  }, [collegeId]);
+
+  useEffect(() => {
+    if (activeSection === "regular" && activeSectionRef.current !== "regular") {
+      setRegularForm((prev) => ({
+        ...prev,
+        email: "",
+        password: ""
+      }));
+    }
+    activeSectionRef.current = activeSection;
+  }, [activeSection]);
 
   useEffect(() => {
     if (selectedEventId) {
@@ -333,16 +391,19 @@ function AdminDashboard() {
     }
   };
 
-  const viewResultDetail = async (resultId) => {
-    if (!resultId) return;
+  const viewResultDetail = async (result) => {
+    if (!result?.result_id) return;
     setDetailLoading(true);
     try {
-      const response = await fetch(`/admin/result-answers/${resultId}`);
+      const response = await fetch(`/admin/result-answers/${result.result_id}`);
       const data = await response.json();
       if (data.success) {
-        setActiveResultDetail({
-          resultId,
-          questions: data.questions || []
+        navigate("/admin/result-review", {
+          state: {
+            resultId: result.result_id,
+            result,
+            questions: data.questions || []
+          }
         });
       }
     } catch (err) {
@@ -398,6 +459,70 @@ function AdminDashboard() {
     } catch (err) {
       console.error("Walk-in creation error:", err);
       setWalkinStatus("Server error while creating walk-in student.");
+    }
+  };
+
+  const handleRegularCreation = async (event) => {
+    event.preventDefault();
+    setRegularStatus("");
+    setRegularCredentials(null);
+
+    const trimmedName = regularForm.name.trim();
+    const trimmedEmail = regularForm.email.trim();
+    const trimmedPhone = regularForm.phone.trim();
+    const trimmedDob = regularForm.dob.trim();
+    const trimmedCourse = regularForm.course.trim();
+    const passwordValue = regularForm.password;
+    const selectedCollegeId = regularForm.collegeId;
+
+    if (
+      !trimmedName ||
+      !trimmedEmail ||
+      !trimmedPhone ||
+      !trimmedDob ||
+      !trimmedCourse ||
+      !passwordValue ||
+      !selectedCollegeId
+    ) {
+      setRegularStatus("Fill all regular student details.");
+      return;
+    }
+
+    try {
+      const response = await fetch("/admin/students/regular", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: trimmedName,
+          email: trimmedEmail,
+          phone: trimmedPhone,
+          dob: trimmedDob,
+          course: trimmedCourse,
+          collegeId: selectedCollegeId,
+          password: passwordValue
+        })
+      });
+      const data = await response.json();
+      if (!data.success) {
+        setRegularStatus(data.message || "Failed to create regular student.");
+        return;
+      }
+
+      setRegularStatus("Regular student created. Credentials are now active.");
+      setRegularCredentials(data.credentials);
+      setRegularForm((prev) => ({
+        ...prev,
+        name: "",
+        email: "",
+        phone: "",
+        dob: "",
+        course: "",
+        password: ""
+      }));
+      loadStudents();
+    } catch (err) {
+      console.error("Regular creation error:", err);
+      setRegularStatus("Server error while creating regular student.");
     }
   };
 
@@ -548,6 +673,11 @@ function AdminDashboard() {
     event.preventDefault();
     setGenerateStatus("");
 
+    if (isWalkinEventSelected) {
+      setGenerateStatus("Walk-in exams already consume the fixed question bank.");
+      return;
+    }
+
     if (!selectedExamId || !questionCount) {
       setGenerateStatus("Select exam and number of questions.");
       return;
@@ -616,6 +746,7 @@ function AdminDashboard() {
   const activeExams = totalActiveExamCount;
   const isDashboardView = !showProfile && activeSection === "dashboard";
   const walkinStudents = students.filter((student) => student.student_type === "WALKIN");
+  const regularStudents = students.filter((student) => student.student_type === "REGULAR");
 
   return (
     <div className="dashboard-shell">
@@ -698,6 +829,14 @@ function AdminDashboard() {
             onClick={() => handleSectionClick("walkin")}
           >
             Walk-In Management
+          </button>
+          <span className="nav-group">Regular Students</span>
+          <button
+            type="button"
+            className={`nav-button ${activeSection === "regular" ? "active" : ""}`}
+            onClick={() => handleSectionClick("regular")}
+          >
+            Regular Student Management
           </button>
           <span className="nav-group">Account</span>
           <button
@@ -833,7 +972,7 @@ function AdminDashboard() {
                       return (
                         <tr key={result.result_id}>
                           <td>{result.result_id}</td>
-                          <td>{result.student_id}</td>
+                          <td>{result.student_name || result.student_id}</td>
                           <td>{result.exam_name || result.exam_id}</td>
                           <td>
                             {result.exam_start_date && result.exam_end_date
@@ -852,7 +991,7 @@ function AdminDashboard() {
                             <button
                               className="ghost-action"
                               type="button"
-                              onClick={() => viewResultDetail(result.result_id)}
+                              onClick={() => viewResultDetail(result)}
                             >
                               View
                             </button>
@@ -984,39 +1123,174 @@ function AdminDashboard() {
                           <td colSpan="5" style={{ textAlign: "center" }}>No walk-in students found</td>
                         </tr>
                       )}
-              {walkinStudents.map((student) => {
-                const passwordRevealed = Boolean(revealedPasswords[student.student_id]);
-                return (
-                  <tr key={student.student_id}>
-                    <td>{student.student_id}</td>
-                    <td>{student.name}</td>
-                    <td>{student.email_id}</td>
-                    <td>{student.contact_number}</td>
-                    <td>
-                      {student.dob ? new Date(student.dob).toLocaleDateString() : "--"}
-                    </td>
-                    <td>{student.course}</td>
-                    <td>
-                      {student.password ? (
-                        <button
-                          type="button"
-                          className="password-toggle"
-                          onClick={() => toggleWalkinPassword(student.student_id)}
-                        >
-                          <span className="password-mask">
-                            {passwordRevealed ? student.password : "********"}
-                          </span>
-                          <span className="password-label">
-                            {passwordRevealed ? "Hide" : "Show"}
-                          </span>
-                        </button>
-                      ) : (
-                        "Not set"
+                      {walkinStudents.map((student) => {
+                        const passwordRevealed = Boolean(revealedPasswords[student.student_id]);
+                        return (
+                          <tr key={student.student_id}>
+                            <td>{student.student_id}</td>
+                            <td>{student.name}</td>
+                            <td>{student.email_id}</td>
+                            <td>{student.contact_number}</td>
+                            <td>
+                              {student.dob ? new Date(student.dob).toLocaleDateString() : "--"}
+                            </td>
+                            <td>{student.course}</td>
+                            <td>
+                              {student.password ? (
+                                <button
+                                  type="button"
+                                  className="password-toggle"
+                                  onClick={() => toggleWalkinPassword(student.student_id)}
+                                >
+                                  <span className="password-mask">
+                                    {passwordRevealed ? student.password : "********"}
+                                  </span>
+                                  <span className="password-label">
+                                    {passwordRevealed ? "Hide" : "Show"}
+                                  </span>
+                                </button>
+                              ) : (
+                                "Not set"
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+              )}
+
+              {activeSection === "regular" && (
+              <>
+                <div className="dashboard-section admin-section" id="regular-create">
+                  <h2>Create Regular Student Account</h2>
+                  <form className="form-row form-row-wide" autoComplete="off" onSubmit={handleRegularCreation}>
+                    <div className="form-field">
+                      <label>Full Name</label>
+                      <input
+                        type="text"
+                        placeholder="Enter full name"
+                        value={regularForm.name}
+                        onChange={(event) => setRegularForm({ ...regularForm, name: event.target.value })}
+                      />
+                    </div>
+                    <div className="form-field">
+                      <label>College</label>
+                      <select
+                        value={regularForm.collegeId}
+                        onChange={(event) => setRegularForm({ ...regularForm, collegeId: event.target.value })}
+                        required
+                      >
+                        <option value="">Select college</option>
+                        {collegeOptions.map((college) => (
+                          <option key={college.college_id} value={college.college_id}>
+                            {college.college_name}
+                          </option>
+                        ))}
+                      </select>
+                      {collegeError && (
+                        <p className="auth-help" style={{ color: "#f8c7c7" }}>
+                          {collegeError}
+                        </p>
                       )}
-                    </td>
-                  </tr>
-                );
-              })}
+                    </div>
+                    <div className="form-field">
+                      <label>Email</label>
+                      <input
+                        type="email"
+                        placeholder="Enter email"
+                        autoComplete="off"
+                        value={regularForm.email}
+                        onChange={(event) => setRegularForm({ ...regularForm, email: event.target.value })}
+                      />
+                    </div>
+                    <div className="form-field">
+                      <label>Phone Number</label>
+                      <input
+                        type="text"
+                        placeholder="Enter contact number"
+                        value={regularForm.phone}
+                        onChange={(event) => setRegularForm({ ...regularForm, phone: event.target.value })}
+                      />
+                    </div>
+                    <div className="form-field">
+                      <label>Date of Birth</label>
+                      <input
+                        type="date"
+                        value={regularForm.dob}
+                        onChange={(event) => setRegularForm({ ...regularForm, dob: event.target.value })}
+                      />
+                    </div>
+                    <div className="form-field">
+                      <label>Course</label>
+                      <select
+                        value={regularForm.course}
+                        onChange={(event) => setRegularForm({ ...regularForm, course: event.target.value })}
+                      >
+                        <option value="">Select Course</option>
+                        {REGULAR_COURSES.map((course) => (
+                          <option key={course} value={course}>
+                            {course}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-field">
+                      <label>Password</label>
+                      <input
+                        type="password"
+                        placeholder="Set password"
+                        autoComplete="new-password"
+                        value={regularForm.password}
+                        onChange={(event) => setRegularForm({ ...regularForm, password: event.target.value })}
+                      />
+                    </div>
+                    <button type="submit">Create Regular Account</button>
+                  </form>
+                  {regularStatus && (
+                    <p className="auth-help" style={{ marginTop: 10 }}>
+                      {regularStatus}
+                      {regularCredentials && (
+                        <span>
+                          <br />
+                          ID: <strong>{regularCredentials.studentId}</strong>
+                        </span>
+                      )}
+                    </p>
+                  )}
+                </div>
+
+                <div className="dashboard-section admin-section" id="regular-list">
+                  <h2>Regular Students</h2>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Student ID</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Contact</th>
+                        <th>DOB</th>
+                        <th>Course</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {regularStudents.length === 0 && (
+                        <tr>
+                          <td colSpan="6" style={{ textAlign: "center" }}>No regular students found</td>
+                        </tr>
+                      )}
+                      {regularStudents.map((student) => (
+                        <tr key={student.student_id}>
+                          <td>{student.student_id}</td>
+                          <td>{student.name}</td>
+                          <td>{student.email_id}</td>
+                          <td>{student.contact_number}</td>
+                          <td>{student.dob ? new Date(student.dob).toLocaleDateString() : "--"}</td>
+                          <td>{student.course}</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
@@ -1311,33 +1585,41 @@ function AdminDashboard() {
               {(isDashboardView || activeSection === "generate") && (
               <div className="dashboard-section admin-section" id="admin-generate">
                 <h2>Generate Questions</h2>
-                <form className="form-row" onSubmit={handleGenerateQuestions}>
-                  <select
-                    value={selectedExamId}
-                    onChange={(event) => setSelectedExamId(event.target.value)}
-                  >
-                    <option value="">Select Exam</option>
-                    {exams.map((exam) => (
-                      <option key={exam.exam_id} value={exam.exam_id}>
-                        Exam {exam.exam_id} ({exam.course})
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    type="number"
-                    placeholder="No. of Questions"
-                    value={questionCount}
-                    onChange={(event) => setQuestionCount(event.target.value)}
-                  />
-                  <button
-                    type="submit"
-                    disabled={!selectedExamId || selectedExamId === generatedExamId}
-                  >
-                    Generate
-                  </button>
-                </form>
+                {isWalkinEventSelected ? (
+                  <p className="auth-help" style={{ color: "#a5f3fc" }}>
+                    Walk-in exams automatically pull the shared aptitude bank, the stream-specific
+                    descriptive section, and the coding questions. The exam is marked ready as soon as
+                    it is created.
+                  </p>
+                ) : (
+                  <form className="form-row" onSubmit={handleGenerateQuestions}>
+                    <select
+                      value={selectedExamId}
+                      onChange={(event) => setSelectedExamId(event.target.value)}
+                    >
+                      <option value="">Select Exam</option>
+                      {exams.map((exam) => (
+                        <option key={exam.exam_id} value={exam.exam_id}>
+                          Exam {exam.exam_id} ({exam.course})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      placeholder="No. of Questions"
+                      value={questionCount}
+                      onChange={(event) => setQuestionCount(event.target.value)}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!selectedExamId || selectedExamId === generatedExamId}
+                    >
+                      Generate
+                    </button>
+                  </form>
+                )}
                 {generateStatus && <p id="generateStatus">{generateStatus}</p>}
-                {selectedExamId && selectedExamId === generatedExamId && (
+                {!isWalkinEventSelected && selectedExamId && selectedExamId === generatedExamId && (
                   <p
                     className="auth-help"
                     style={{ marginTop: 8, color: "#ffb3b3" }}
@@ -1367,62 +1649,6 @@ function AdminDashboard() {
                   <span className="profile-value">Administrator</span>
                 </div>
               </div>
-              {activeResultDetail && (
-                <div className="dashboard-section admin-section result-review">
-                  <div className="result-review-header">
-                    <h3>Exam review — Result #{activeResultDetail.resultId}</h3>
-                    <button
-                      className="ghost-action"
-                      type="button"
-                      onClick={() => setActiveResultDetail(null)}
-                    >
-                      Close
-                    </button>
-                  </div>
-                  {detailLoading ? (
-                    <p>Loading questions…</p>
-                  ) : (
-                    <div className="question-review-grid">
-                      {(activeResultDetail.questions || []).map((q) => {
-                        const options = [
-                          { key: "A", label: q.option_a },
-                          { key: "B", label: q.option_b },
-                          { key: "C", label: q.option_c },
-                          { key: "D", label: q.option_d }
-                        ];
-                        const isSelected = (option) => option.key === q.selected_option;
-                        const isCorrect = (option) => option.key === q.correct_answer;
-                        return (
-                          <article className="question-review-card" key={`${q.question_id}`}>
-                            <p className="question-review-text">
-                              <strong>Q:</strong> {q.question_text}
-                            </p>
-                            <div className="question-options">
-                              {options.map((option) => (
-                                <span
-                                  key={option.key}
-                                  className={[
-                                    "question-option",
-                                    isSelected(option) ? "selected" : "",
-                                    isCorrect(option) ? "correct" : "",
-                                    isSelected(option) && option.key !== q.correct_answer
-                                      ? "incorrect"
-                                      : ""
-                                  ]
-                                    .filter(Boolean)
-                                    .join(" ")}
-                                >
-                                  <strong>{option.key}</strong> {option.label}
-                                </span>
-                              ))}
-                            </div>
-                          </article>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
           )}
           </section>

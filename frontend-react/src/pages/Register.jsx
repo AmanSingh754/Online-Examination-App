@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useBodyClass from "../hooks/useBodyClass.js";
 
 function Register() {
   useBodyClass("landing-page student-landing auth-page");
   const [notice, setNotice] = useState("");
+  const [colleges, setColleges] = useState([]);
+  const [collegeError, setCollegeError] = useState("");
   const [formState, setFormState] = useState({
     name: "",
-    studentId: "",
     email: "",
     phone: "",
     dob: "",
@@ -15,11 +16,34 @@ function Register() {
     password: "",
   });
 
+  useEffect(() => {
+    async function loadColleges() {
+      try {
+        const response = await fetch("/student/colleges");
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0) {
+          setColleges(data);
+          setFormState((prev) => ({
+            ...prev,
+            collegeId: String(data[0].college_id)
+          }));
+          setCollegeError("");
+        } else {
+          setCollegeError("No colleges available yet.");
+        }
+      } catch (err) {
+        console.error("College load error:", err);
+        setCollegeError("Could not load colleges.");
+      }
+    }
+    loadColleges();
+  }, []);
+
   const handleSubmit = async (event) => {
     event.preventDefault();
     setNotice("");
 
-    if (!formState.name || !formState.studentId || !formState.email || !formState.phone || !formState.dob || !formState.course || !formState.collegeId || !formState.password) {
+    if (!formState.name || !formState.email || !formState.phone || !formState.dob || !formState.course || !formState.collegeId || !formState.password) {
       setNotice("Please fill in all fields.");
       return;
     }
@@ -30,7 +54,6 @@ function Register() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: formState.name,
-          studentId: formState.studentId,
           email: formState.email,
           phone: formState.phone,
           dob: formState.dob,
@@ -44,10 +67,10 @@ function Register() {
         setNotice(data.message || "Registration failed.");
         return;
       }
-      setNotice("Registration successful. Please log in.");
+      const successMessage = `Registration successful${data.studentId ? ` (Student ID: ${data.studentId})` : ""}. Please log in.`;
+      setNotice(successMessage);
       setFormState({
         name: "",
-        studentId: "",
         email: "",
         phone: "",
         dob: "",
@@ -97,13 +120,6 @@ function Register() {
               required
             />
             <input
-              type="number"
-              placeholder="Student ID"
-              value={formState.studentId}
-              onChange={(event) => setFormState({ ...formState, studentId: event.target.value })}
-              required
-            />
-            <input
               type="email"
               placeholder="Email"
               value={formState.email}
@@ -131,13 +147,24 @@ function Register() {
               onChange={(event) => setFormState({ ...formState, course: event.target.value })}
               required
             />
-            <input
-              type="number"
-              placeholder="College ID"
+            {collegeError && (
+              <p className="auth-help" style={{ color: "#f8c7c7" }}>
+                {collegeError}
+              </p>
+            )}
+            <label className="auth-label">College</label>
+            <select
               value={formState.collegeId}
               onChange={(event) => setFormState({ ...formState, collegeId: event.target.value })}
               required
-            />
+            >
+              <option value="">Select college</option>
+              {colleges.map((college) => (
+                <option key={college.college_id} value={college.college_id}>
+                  {college.college_name}
+                </option>
+              ))}
+            </select>
             <input
               type="password"
               placeholder="Create Password"
