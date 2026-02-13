@@ -1,8 +1,10 @@
 require("dotenv").config();
+process.env.TZ = process.env.APP_TIMEZONE || "Asia/Kolkata";
 const express = require("express");
 const session = require("express-session");
 const path = require("path");
 const fs = require("fs");
+const MySQLSessionStore = require("./mysqlSessionStore");
 
 
 const studentRoutes = require("./routes/student.routes");
@@ -10,6 +12,19 @@ const examRoutes = require("./routes/exam.routes");
 const adminRoutes = require("./routes/admin.routes");
 
 const app = express();
+const sessionTtlMs = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 8);
+const sessionStore = new MySQLSessionStore({
+    host: process.env.DB_HOST || "localhost",
+    port: Number(process.env.DB_PORT || 3306),
+    user: process.env.DB_USER || "root",
+    password: process.env.DB_PASSWORD || "12345",
+    database: process.env.DB_NAME || "Project1",
+    timezone: process.env.DB_TIMEZONE || "+05:30",
+    tableName: process.env.SESSION_TABLE_NAME || "user_sessions",
+    ttlMs: sessionTtlMs,
+    cleanupMs: Number(process.env.SESSION_CLEANUP_MS || 1000 * 60 * 15)
+});
+app.locals.sessionStore = sessionStore;
 
 const reactDist = path.join(__dirname, "../frontend-react/dist");
 const legacyFrontend = path.join(__dirname, "../Frontend");
@@ -18,12 +33,16 @@ const hasReactBuild = fs.existsSync(reactDist);
 app.use(express.json());
 app.use(
     session({
+        store: sessionStore,
+        name: process.env.SESSION_COOKIE_NAME || "exam.sid",
         secret: process.env.SESSION_SECRET || "dev-session-secret",
         resave: false,
         saveUninitialized: false,
+        rolling: true,
         cookie: {
             httpOnly: true,
-            sameSite: "lax"
+            sameSite: "lax",
+            maxAge: sessionTtlMs
         }
     })
 );
@@ -93,8 +112,8 @@ app.use("/admin", adminRoutes);
 if (hasReactBuild) {
     app.get(/^\/(admin|student)(\/.*)?$/, (req, res, next) => {
         if (
-            req.path.startsWith("/admin/events") ||
             req.path.startsWith("/admin/exams") ||
+            req.path.startsWith("/admin/walkin") ||
             req.path.startsWith("/student/exams") ||
             req.path.startsWith("/student/attempted-exams")
         ) {

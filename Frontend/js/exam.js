@@ -9,6 +9,7 @@ if (!studentId) {
 // ================= GET EXAM ID =================
 const params = new URLSearchParams(window.location.search);
 const examId = params.get("examId");
+const studentExamId = Number(params.get("studentExamId") || 0);
 
 if (!examId) {
     alert("Invalid exam");
@@ -33,26 +34,6 @@ fetch(`/exam/attempted/${studentId}/${examId}`)
         alert("Unable to verify exam now");
         window.location.href = "/student";
     });
-
-// ================= TIMER =================
-let timeLeft = 30 * 60; // 30 minutes
-const timerEl = document.getElementById("timerText");
-
-const timerInterval = setInterval(() => {
-    const min = Math.floor(timeLeft / 60);
-    const sec = timeLeft % 60;
-
-    timerEl.innerText =
-        `Time Left: ${min}:${sec < 10 ? "0" : ""}${sec}`;
-
-    timeLeft--;
-
-    if (timeLeft < 0) {
-        clearInterval(timerInterval);
-        alert("Time up! Submitting exam.");
-        document.getElementById("examForm").dispatchEvent(new Event("submit"));
-    }
-}, 1000);
 
 // ================= LOAD QUESTIONS =================
 fetch(`/exam/questions/${examId}`)
@@ -179,6 +160,7 @@ document.getElementById("examForm").addEventListener("submit", e => {
         body: JSON.stringify({
             studentId,
             examId,
+            studentExamId: studentExamId > 0 ? studentExamId : null,
             answers
         })
     })

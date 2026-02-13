@@ -76,7 +76,7 @@ function AdminResultReview() {
   const handleBack = () => {
     navigate("/admin/dashboard", {
       replace: true,
-      state: { activeSection: "results" }
+      state: { activeSection: "regular-results" }
     });
   };
 

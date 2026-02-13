@@ -1,10 +1,9 @@
-import { useState, useEffect } from "react";   // ✅ useEffect added
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 
-
 function AdminLogin() {
-   useBodyClass("landing-page admin-landing auth-page");
+  useBodyClass("landing-page admin-landing auth-page");
 
   const navigate = useNavigate();
 
@@ -13,12 +12,10 @@ function AdminLogin() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    // 🔹 Clear old admin cache
     localStorage.removeItem("adminId");
     localStorage.removeItem("collegeId");
     localStorage.removeItem("collegeName");
 
-    // 🔹 Reset form state
     setEmail("");
     setPassword("");
     setError("");
@@ -42,19 +39,15 @@ function AdminLogin() {
 
       const data = await response.json();
       if (!data.success) {
-        setError("Invalid credentials.");
+        setError(data.message || "Invalid credentials.");
         return;
       }
 
-      // ✅ SET FRESH LOGIN DATA
       localStorage.setItem("adminId", data.adminId);
-      localStorage.setItem("collegeId", data.collegeId);
-      localStorage.setItem("collegeName", data.collegeName);
-
       navigate("/admin/dashboard");
     } catch (err) {
       console.error("Admin login error:", err);
-      setError("Server error.");
+      setError(err?.message || "Login failed. Please try again.");
     }
   };
 
@@ -96,24 +89,23 @@ function AdminLogin() {
           <h2>Admin Login</h2>
           <p className="auth-meta">Use your official admin email and password.</p>
           <form onSubmit={handleSubmit}>
-           <input
-                  type="email"
-                  placeholder="Admin Email"
-                  value={email}
-                  autoComplete="off"
-                  onChange={(event) => setEmail(event.target.value)}
-                  required
-               />
+            <input
+              type="email"
+              placeholder="Admin Email"
+              value={email}
+              autoComplete="off"
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
 
-                  <input
-                        type="password"
-                        placeholder="Password"
-                        value={password}
-                        autoComplete="new-password"
-                        onChange={(event) => setPassword(event.target.value)}
-                        required
-                  />
-
+            <input
+              type="password"
+              placeholder="Password"
+              value={password}
+              autoComplete="new-password"
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
 
             <button type="submit">Login</button>
           </form>

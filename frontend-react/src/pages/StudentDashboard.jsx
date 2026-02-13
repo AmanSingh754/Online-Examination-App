@@ -17,6 +17,10 @@ function StudentDashboard() {
   const [availableExams, setAvailableExams] = useState([]);
   const [attemptedExams, setAttemptedExams] = useState([]);
   const [showProfile, setShowProfile] = useState(false);
+  const isWalkinDashboard = [...availableExams, ...attemptedExams].some((exam) =>
+    /walk[\s-]*in/i.test(String(exam?.exam_name || ""))
+  );
+  const courseLabel = isWalkinDashboard ? "Specialization" : "Course";
 
   useEffect(() => {
     if (!studentId || !studentName) {
@@ -57,7 +61,22 @@ function StudentDashboard() {
         alert("You have already attempted this exam.");
         return;
       }
-      navigate(`/exam?examId=${examId}`);
+      const startResponse = await fetch("/exam/start", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ studentId, examId })
+      });
+      const startData = await startResponse.json();
+      if (!startResponse.ok || !startData.success) {
+        alert(startData.message || "Unable to start exam.");
+        return;
+      }
+      const studentExamId = Number(startData.studentExamId || 0);
+      const query = studentExamId > 0
+        ? `/exam?examId=${examId}&studentExamId=${studentExamId}`
+        : `/exam?examId=${examId}`;
+      navigate(query);
     } catch (err) {
       console.error("Start exam error:", err);
     }
@@ -101,6 +120,16 @@ function StudentDashboard() {
       day: "numeric",
       month: "long",
       year: "numeric",
+    });
+  };
+
+  const formatExamDate = (value) => {
+    if (!value) return "Not available";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
     });
   };
 
@@ -219,7 +248,7 @@ function StudentDashboard() {
                         <th>Exam</th>
                         <th>Date</th>
                         <th>Time</th>
-                        <th>Course</th>
+                        <th>{courseLabel}</th>
                         <th>Action</th>
                       </tr>
                     </thead>
@@ -235,11 +264,13 @@ function StudentDashboard() {
                         <tr key={exam.exam_id}>
                           <td>{exam.exam_name}</td>
                           <td>
-                            {formatDate(exam.exam_start_date)} to{" "}
-                            {formatDate(exam.exam_end_date)}
+                            {formatExamDate(exam.exam_start_date)} -{" "}
+                            {formatExamDate(exam.exam_end_date)}
                           </td>
                           <td>
-                            {exam.start_time} - {exam.end_time}
+                            {Number(exam.duration_minutes || 0) > 0
+                              ? `${Number(exam.duration_minutes)} min`
+                              : `${exam.start_time || "-"} - ${exam.end_time || "-"}`}
                           </td>
                           <td>{exam.course}</td>
                           <td>
@@ -265,7 +296,7 @@ function StudentDashboard() {
                       <tr>
                         <th>Exam</th>
                         <th>Date</th>
-                        <th>Course</th>
+                        <th>{courseLabel}</th>
                         <th>Status</th>
                       </tr>
                     </thead>
@@ -281,8 +312,8 @@ function StudentDashboard() {
                         <tr key={`${exam.exam_id}`}>
                           <td>{exam.exam_name}</td>
                           <td>
-                            {formatDate(exam.exam_start_date)} to{" "}
-                            {formatDate(exam.exam_end_date)}
+                            {formatExamDate(exam.exam_start_date)} -{" "}
+                            {formatExamDate(exam.exam_end_date)}
                           </td>
                           <td>{exam.course}</td>
                           <td>{exam.attempt_status}</td>
@@ -318,11 +349,11 @@ function StudentDashboard() {
                     </span>
                   </div>
                   <div className="profile-item">
-                    <span className="profile-label">Course</span>
+                    <span className="profile-label">{courseLabel}</span>
                     <span className="profile-value">{studentCourse}</span>
                   </div>
                   <div className="profile-item">
-                    <span className="profile-label">Roll No</span>
+                    <span className="profile-label">Registration Number</span>
                     <span className="profile-value">{studentId}</span>
                   </div>
                   <div className="profile-item">

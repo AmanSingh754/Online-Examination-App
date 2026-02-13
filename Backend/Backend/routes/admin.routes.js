@@ -338,4 +338,33 @@ router.post("/generate-questions/:examId", async (req, res) => {
     );
 });
 
+/* ================= STUDENT STATUS ================= */
+const updateStudentStatus = (req, res) => {
+    const studentId = Number(req.params.studentId || 0);
+    const requested = String(req.body?.status || "").trim().toUpperCase();
+    const normalized = requested === "INACTIVE" ? "INACTIVE" : "ACTIVE";
+    if (!studentId) {
+        return res.status(400).json({ success: false, message: "Invalid student id" });
+    }
+
+    db.query(
+        `UPDATE students SET status = ? WHERE student_id = ?`,
+        [normalized, studentId],
+        (err, result) => {
+            if (err) {
+                console.error("Status update error:", err);
+                return res.status(500).json({ success: false, message: "Could not update status" });
+            }
+            if (!result || Number(result.affectedRows || 0) === 0) {
+                return res.status(404).json({ success: false, message: "Student not found" });
+            }
+            return res.json({ success: true, status: normalized });
+        }
+    );
+};
+
+router.patch("/students/:studentId/status", updateStudentStatus);
+router.put("/students/:studentId/status", updateStudentStatus);
+router.post("/students/:studentId/status", updateStudentStatus);
+
 module.exports = router;

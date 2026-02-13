@@ -45,7 +45,7 @@ function StudentLogin() {
 
       const data = await response.json();
       if (!data.success) {
-        setError("Invalid credentials.");
+        setError(data.message || "Invalid credentials.");
         return;
       }
 
@@ -64,7 +64,7 @@ function StudentLogin() {
       navigate("/student/dashboard");
     } catch (err) {
       console.error("Student login error:", err);
-      setError("Server error.");
+      setError(err?.message || "Login failed. Please try again.");
     }
   };
 

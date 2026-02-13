@@ -155,7 +155,24 @@ function startExam(examId) {
             if (data.attempted) {
                 alert("You have already attempted this exam.");
             } else {
-                window.location.href = `/exam.html?examId=${examId}`;
+                fetch("/exam/start", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ studentId, examId })
+                })
+                    .then(res => res.json())
+                    .then(startData => {
+                        if (!startData || !startData.success) {
+                            alert(startData?.message || "Unable to start exam.");
+                            return;
+                        }
+                        const studentExamId = Number(startData.studentExamId || 0);
+                        const suffix = studentExamId > 0 ? `&studentExamId=${studentExamId}` : "";
+                        window.location.href = `/exam.html?examId=${examId}${suffix}`;
+                    })
+                    .catch(() => {
+                        alert("Unable to start exam.");
+                    });
             }
         });
 }

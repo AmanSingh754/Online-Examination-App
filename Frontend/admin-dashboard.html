@@ -17,7 +17,6 @@
 </head>
 
 <body class="admin-dashboard">
-
 <div class="admin-layout">
   <aside class="admin-sidebar">
     <div class="sidebar-top">
@@ -32,17 +31,13 @@
         <div class="profile-badge">A</div>
         <div>
           <h3>Welcome Admin</h3>
-          <p>Manage exams & events</p>
+          <p>Manage exams</p>
         </div>
-        </div>
-      </div>
       </div>
     </div>
 
     <nav class="sidebar-nav">
       <a href="#admin-overview" class="active">Dashboard</a>
-      <a href="#admin-create-event">Create Event</a>
-      <a href="#admin-events">Exam Events</a>
       <a href="#admin-create-exam">Create Exam</a>
       <a href="#admin-exams">Exams</a>
       <a href="#admin-generate">Generate Questions</a>
@@ -63,119 +58,68 @@
     </header>
 
     <section class="dashboard-container">
+      <div class="admin-section" id="admin-create-exam">
+        <h2>Schedule Exam</h2>
+        <div class="form-row">
+          <select id="courseSelect">
+            <option value="">Select Course</option>
+            <option value="BCA">BCA</option>
+            <option value="BSc CS">BSc CS</option>
+            <option value="BTech CS">BTech CS</option>
+            <option value="BTech IT">BTech IT</option>
+            <option value="MCA">MCA</option>
+            <option value="MSc CS">MSc CS</option>
+            <option value="MTech CS">MTech CS</option>
+            <option value="MTech IT">MTech IT</option>
+            <option value="OTHER">Other</option>
+          </select>
 
-    <!-- CREATE EVENT -->
-    <div class="admin-section" id="admin-create-event">
-      <h2>Create Exam Event</h2>
-      <div class="form-row">
-        <input type="text" id="eventName" placeholder="Event Name">
-        <input type="date" id="examStartDate">
-        <input type="date" id="examEndDate">
-        <input type="time" id="startTime">
-        <input type="time" id="endTime">
-        <input type="number" id="cutoff" placeholder="Cutoff %">
-        <select id="eventType">
-          <option value="REGULAR">Regular</option>
-          <option value="WALKIN">Walk-In</option>
-        </select>
-        <button id="createEventBtn" onclick="createEvent()">Create</button>
+          <input
+            type="text"
+            id="customCourse"
+            placeholder="Enter custom course"
+            style="display:none;"
+          >
+          <input type="date" id="startDate">
+          <input type="time" id="startTime">
+          <input type="date" id="endDate">
+          <input type="time" id="endTime">
+          <input type="number" id="cutoffInput" placeholder="Cutoff % (optional)">
+
+          <button id="createExamBtn" onclick="createExam()">Create</button>
+        </div>
       </div>
-      <p id="eventStatus"></p>
-    </div>
 
-  <!-- EVENTS TABLE -->
-  <div class="admin-section" id="admin-events">
-    <h2>Exam Events</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Event</th>
-          <th>Date</th>
-          <th>Time</th>
-          <th>Cutoff</th>
-          <th>Status</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody id="eventsTable">
-        <tr><td colspan="7">Loading...</td></tr>
-      </tbody>
-    </table>
-  </div>
+      <div class="admin-section" id="admin-exams">
+        <h2>Exams</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Course</th>
+              <th>Status</th>
+              <th>Schedule</th>
+              <th>Cutoff</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="examTable">
+            <tr><td colspan="6">Loading exams...</td></tr>
+          </tbody>
+        </table>
+      </div>
 
-  <!-- CREATE EXAM -->
-  <div class="admin-section" id="admin-create-exam">
-    <h2>Create Exam</h2>
-    <div class="form-row">
-      <select id="eventSelect">
-        <option value="">Select Event</option>
-      </select>
-
-      <select id="courseSelect">
-        <option value="">Select Course</option>
-        <option value="BCA">BCA</option>
-        <option value="BSc CS">BSc CS</option>
-        <option value="BTech CS">BTech CS</option>
-        <option value="BTech IT">BTech IT</option>
-        <option value="MCA">MCA</option>
-        <option value="MSc CS">MSc CS</option>
-        <option value="MTech CS">MTech CS</option>
-        <option value="MTech IT">MTech IT</option>
-        <option value="OTHER">Other</option>
-      </select>
-
-      <select id="streamSelect" style="display:none;">
-        <option value="">Select Stream</option>
-        <option value="Data Science">Data Science</option>
-        <option value="Data Analyst">Data Analyst</option>
-        <option value="MERN">MERN</option>
-      </select>
-
-      <input
-        type="text"
-        id="customCourse"
-        placeholder="Enter custom course"
-        style="display:none;"
-      >
-
-      <!-- ✅ FIX -->
-      <button id="createExamBtn" onclick="createExam()">Create</button>
-    </div>
-  </div>
-
-  <!-- EXAMS TABLE -->
-  <div class="admin-section" id="admin-exams">
-    <h2>Exams</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Course</th>
-          <th>Status</th>
-          <th>Action</th>
-        </tr>
-      </thead>
-      <tbody id="examTable">
-        <tr><td colspan="4">Select an event</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <!-- GENERATE QUESTIONS -->
-  <div class="admin-section" id="admin-generate">
-    <h2>Generate Questions</h2>
-    <div class="form-row">
-      <select id="examSelect">
-        <option value="">Select Exam</option>
-      </select>
-      <input type="number" id="questionCount" placeholder="No. of Questions">
-      <!-- ✅ FIX -->
-      <button id="generateBtn" onclick="generateQuestions()">Generate</button>
-    </div>
-    <p id="generateStatus"></p>
-  </div>
-
+      <div class="admin-section" id="admin-generate">
+        <h2>Generate Questions</h2>
+        <div class="form-row">
+          <select id="examSelect">
+            <option value="">Select Exam</option>
+          </select>
+          <input type="number" id="questionCount" placeholder="No. of Questions">
+          <button id="generateBtn" onclick="generateQuestions()">Generate</button>
+        </div>
+        <p id="generateStatus"></p>
+      </div>
     </section>
   </main>
 </div>
