@@ -22,7 +22,6 @@ function loadEnvFromCandidates() {
     const candidates = [
         path.resolve(__dirname, ".env"),
         path.resolve(__dirname, "../.env"),
-        path.resolve(__dirname, "../Backend/.env"),
         path.resolve(__dirname, "../../.env")
     ];
 
@@ -53,7 +52,7 @@ function getAzureConfig() {
 
         throw new Error(
             `Azure OpenAI config missing in environment (${missing}). ` +
-            "Use Backend/.env (or Backend/Backend/.env) to set the values before starting the server."
+            "Use Backend/.env to set the values before starting the server."
         );
     }
 

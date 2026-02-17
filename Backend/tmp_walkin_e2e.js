@@ -121,8 +121,15 @@ async function main() {
       await new Promise((r) => setTimeout(r, 800));
     }
 
-    const [descRows] = await db.query(`DESCRIBE walkin_student_answers`);
-    const hasSectionName = descRows.some((r) => String(r.Field).toLowerCase() === 'section_name');
+    const [descRows] = await db.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = 'walkin_student_answers'
+         AND column_name = 'section_name'
+       LIMIT 1`
+    );
+    const hasSectionName = (descRows || []).length > 0;
 
     const [countRows] = await db.query(
       `SELECT UPPER(COALESCE(section_name,'')) AS sec, COUNT(*) AS c

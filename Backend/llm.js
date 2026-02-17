@@ -12,7 +12,7 @@ const azureConfig = {
     apiKey: (process.env.AZURE_OPENAI_API_KEY || "").trim()
 };
 
-const GRADING_PROMPT_VERSION = "walkin-descriptive-v1";
+const GRADING_PROMPT_VERSION = "walkin-descriptive-v2";
 const DEFAULT_TIMEOUT_MS = Number(process.env.LLM_GRADE_TIMEOUT_MS || 8000);
 
 function clampScore(value, maxMarks) {
@@ -33,6 +33,118 @@ function tokenize(text) {
         .replace(/[^a-z0-9\s]/g, " ")
         .split(/\s+/)
         .filter((token) => token.length >= 4);
+}
+
+function normalizeLooseText(text) {
+    return String(text || "")
+        .toLowerCase()
+        .replace(/[`"'.,;:!?()[\]{}]/g, "")
+        .replace(/\s+/g, "")
+        .trim();
+}
+
+function normalizeSentenceText(text) {
+    return String(text || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function stemToken(token) {
+    let normalized = String(token || "").toLowerCase().trim();
+    const synonymMap = {
+        holds: "store",
+        hold: "store",
+        holding: "store",
+        stores: "store",
+        storing: "store",
+        stored: "store",
+        values: "value",
+        variables: "variable"
+    };
+    normalized = synonymMap[normalized] || normalized;
+
+    if (normalized.length > 4 && normalized.endsWith("ing")) normalized = normalized.slice(0, -3);
+    else if (normalized.length > 3 && normalized.endsWith("ed")) normalized = normalized.slice(0, -2);
+    else if (normalized.length > 3 && normalized.endsWith("es")) normalized = normalized.slice(0, -2);
+    else if (normalized.length > 3 && normalized.endsWith("s")) normalized = normalized.slice(0, -1);
+
+    return normalized;
+}
+
+function keywordCoverage(reference, studentAnswer) {
+    const stopwords = new Set([
+        "the", "and", "for", "with", "that", "this", "from", "into", "used",
+        "use", "are", "is", "was", "were", "have", "has", "had", "will", "what",
+        "when", "where", "which", "inside", "output", "answer", "question"
+    ]);
+    const toKeywords = (text) =>
+        String(text || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, " ")
+            .split(/\s+/)
+            .map(stemToken)
+            .filter((token) => token.length >= 4 && !stopwords.has(token));
+
+    const refTokens = Array.from(new Set(toKeywords(reference)));
+    const ansSet = new Set(toKeywords(studentAnswer));
+    if (!refTokens.length) return 0;
+
+    let hits = 0;
+    for (const token of refTokens) {
+        if (ansSet.has(token)) hits += 1;
+    }
+    return hits / refTokens.length;
+}
+
+function bigramSet(text) {
+    const clean = normalizeSentenceText(text).replace(/\s+/g, " ");
+    if (!clean) return new Set();
+    if (clean.length < 2) return new Set([clean]);
+    const set = new Set();
+    for (let i = 0; i < clean.length - 1; i += 1) {
+        set.add(clean.slice(i, i + 2));
+    }
+    return set;
+}
+
+function diceSimilarity(a, b) {
+    const aSet = bigramSet(a);
+    const bSet = bigramSet(b);
+    if (!aSet.size || !bSet.size) return 0;
+    let overlap = 0;
+    for (const token of aSet) {
+        if (bSet.has(token)) overlap += 1;
+    }
+    return (2 * overlap) / (aSet.size + bSet.size);
+}
+
+function computeFairnessFloorScore(reference, studentAnswer, maxMarks) {
+    const referenceText = String(reference || "").trim();
+    const studentText = String(studentAnswer || "").trim();
+    if (!referenceText || !studentText || !maxMarks) return 0;
+
+    const looseRef = normalizeLooseText(referenceText);
+    const looseAns = normalizeLooseText(studentText);
+    if (looseRef && looseRef === looseAns) {
+        return clampScore(maxMarks, maxMarks);
+    }
+
+    const similarity = diceSimilarity(referenceText, studentText);
+    const coverage = keywordCoverage(referenceText, studentText);
+    let minRatio = 0;
+
+    if (similarity >= 0.97) minRatio = 1;
+    else if (similarity >= 0.9) minRatio = Math.max(minRatio, 0.9);
+    else if (similarity >= 0.8) minRatio = Math.max(minRatio, 0.75);
+    else if (similarity >= 0.7 && coverage >= 0.5) minRatio = Math.max(minRatio, 0.6);
+    else if (similarity >= 0.62 && coverage >= 0.4) minRatio = Math.max(minRatio, 0.5);
+
+    if (coverage >= 0.75) minRatio = Math.max(minRatio, 0.75);
+    else if (coverage >= 0.6) minRatio = Math.max(minRatio, 0.6);
+
+    return clampScore(minRatio * maxMarks, maxMarks);
 }
 
 function fallbackSimilarityScore(reference, studentAnswer, maxMarks) {
@@ -69,6 +181,61 @@ function normalizeSummaryText(text) {
         .filter(Boolean)
         .join("\n");
     return cleaned.trim();
+}
+
+function buildMandatorySectionLines(analytics) {
+    const fmt = (scored, max) => `${Number(scored || 0).toFixed(2)}/${Number(max || 0).toFixed(2)}`;
+    const pct = (scored, max) => (max > 0 ? `${Math.round((scored / max) * 100)}%` : "N/A");
+    const aptitude = analytics?.sectionTotals?.Aptitude || { scored: 0, max: 0 };
+    const technical = analytics?.sectionTotals?.Technical || { scored: 0, max: 0 };
+    const coding = analytics?.codingDifficulty || {
+        easy: { scored: 0, max: 0, passed: 0, total: 0 },
+        medium: { scored: 0, max: 0, passed: 0, total: 0 },
+        hard: { scored: 0, max: 0, passed: 0, total: 0 }
+    };
+
+    return [
+        `1. Aptitude: ${fmt(aptitude.scored, aptitude.max)} (${pct(aptitude.scored, aptitude.max)}).`,
+        `2. Technical: ${fmt(technical.scored, technical.max)} (${pct(technical.scored, technical.max)}).`,
+        `3. Coding: Easy ${fmt(coding.easy.scored, coding.easy.max)} [TC ${coding.easy.passed}/${coding.easy.total}], Medium ${fmt(coding.medium.scored, coding.medium.max)} [TC ${coding.medium.passed}/${coding.medium.total}], Hard ${fmt(coding.hard.scored, coding.hard.max)} [TC ${coding.hard.passed}/${coding.hard.total}].`
+    ];
+}
+
+function enforceMandatorySectionLines(summaryText, student, analytics, fallbackSummary) {
+    const titleLine = `Performance Summary of ${student?.name || "this student"} (${student?.course || "Walk-In"})`;
+    const mandatory = buildMandatorySectionLines(analytics);
+    const source = normalizeSummaryText(summaryText || "");
+    const fallback = normalizeSummaryText(fallbackSummary || "");
+    const lines = source ? source.split("\n") : [];
+    const fallbackLines = fallback ? fallback.split("\n") : [];
+    const title = lines.find((line) => /^Performance Summary of /i.test(line)) || titleLine;
+
+    const extraPointTexts = lines
+        .filter((line) => /^\d+\.\s*/.test(line))
+        .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+        .filter(Boolean)
+        .slice(3);
+    const fallbackPointTexts = fallbackLines
+        .filter((line) => /^\d+\.\s*/.test(line))
+        .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+        .filter(Boolean)
+        .slice(3);
+
+    const points4To8 = [];
+    for (const text of extraPointTexts) {
+        if (points4To8.length >= 5) break;
+        points4To8.push(text);
+    }
+    for (const text of fallbackPointTexts) {
+        if (points4To8.length >= 5) break;
+        points4To8.push(text);
+    }
+
+    const rebuilt = [title, ...mandatory];
+    for (let i = 0; i < points4To8.length; i += 1) {
+        rebuilt.push(`${i + 4}. ${points4To8[i]}`);
+    }
+    return normalizeSummaryText(rebuilt.join("\n"));
 }
 
 function buildWalkinSummaryAnalytics(rows = []) {
@@ -252,15 +419,17 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
             const rawOutput = await gradeWithAzure(prompt, DEFAULT_TIMEOUT_MS);
             const parsedScore = parseNumericScore(rawOutput);
             const clampedScore = clampScore(parsedScore, normalizedMax);
+            const fairnessFloorScore = computeFairnessFloorScore(referenceText, studentText, normalizedMax);
+            const finalScore = Math.max(clampedScore, fairnessFloorScore);
 
             return {
-                score: clampedScore,
+                score: finalScore,
                 meta: {
                     ...baseMeta,
                     provider: "azure",
                     model: azureConfig.deployment,
                     rawOutput,
-                    reason: "ok"
+                    reason: finalScore > clampedScore ? "ok_with_fairness_floor" : "ok"
                 }
             };
         } catch (error) {
@@ -272,19 +441,23 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
         const rawOutput = await gradeWithOpenAI(prompt, openaiModel, DEFAULT_TIMEOUT_MS);
         const parsedScore = parseNumericScore(rawOutput);
         const clampedScore = clampScore(parsedScore, normalizedMax);
+        const fairnessFloorScore = computeFairnessFloorScore(referenceText, studentText, normalizedMax);
+        const finalScore = Math.max(clampedScore, fairnessFloorScore);
 
         return {
-            score: clampedScore,
+            score: finalScore,
             meta: {
                 ...baseMeta,
                 provider: "openai",
                 model: openaiModel,
                 rawOutput,
-                reason: "ok"
+                reason: finalScore > clampedScore ? "ok_with_fairness_floor" : "ok"
             }
         };
     } catch (error) {
         const fallbackScore = fallbackSimilarityScore(referenceText, studentText, normalizedMax);
+        const fairnessFloorScore = computeFairnessFloorScore(referenceText, studentText, normalizedMax);
+        const finalFallbackScore = Math.max(fallbackScore, fairnessFloorScore);
         const openaiFailureReason = extractErrorMessage(error);
         const reason = azureFailureReason
             ? `azure_failed: ${azureFailureReason}; openai_failed: ${openaiFailureReason}`
@@ -293,11 +466,11 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
                 : openaiFailureReason;
 
         return {
-            score: fallbackScore,
+            score: finalFallbackScore,
             meta: {
                 ...baseMeta,
                 usedFallback: true,
-                reason
+                reason: finalFallbackScore > fallbackScore ? `${reason}; fairness_floor_applied` : reason
             }
         };
     }
@@ -459,9 +632,9 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         "Use simple professional language with direct advisor tone.",
         "Prioritize weaknesses, mistakes, and weak areas over generic praise.",
         "Every weakness point should cite score/testcase evidence from the provided data.",
-        "Point 1: Aptitude performance (score + key mistakes pattern).",
-        "Point 2: Technical performance (score + conceptual/writing gaps).",
-        "Point 3: Coding performance (easy/medium/hard + testcase trend + where failures happened).",
+        "Point 1: Aptitude score only (marks and percentage only; no explanation).",
+        "Point 2: Technical score only (marks and percentage only; no explanation).",
+        "Point 3: Coding score only (easy/medium/hard marks + testcases passed/total only; no explanation).",
         "Point 4: Major weaknesses (where student must labor hard; if hard coding is weak, state it clearly).",
         "Point 5: Good areas/strengths (max 2 short points only).",
         "Point 6: Grammar/spelling/clarity check for technical descriptive responses.",
@@ -488,7 +661,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
             const summary = String(raw || "").trim();
             if (summary) {
                 return {
-                    summary: normalizeSummaryText(summary),
+                    summary: enforceMandatorySectionLines(summary, student, analytics, fallbackSummary),
                     meta: { provider: "azure", model: azureConfig.deployment, usedFallback: false, reason: "ok" }
                 };
             }
@@ -503,7 +676,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         const summary = String(raw || "").trim();
         if (summary) {
             return {
-                summary: normalizeSummaryText(summary),
+                summary: enforceMandatorySectionLines(summary, student, analytics, fallbackSummary),
                 meta: { provider: "openai", model: openaiModel, usedFallback: false, reason: "ok" }
             };
         }

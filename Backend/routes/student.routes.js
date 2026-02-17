@@ -13,7 +13,7 @@ const getWalkinDurationMinutes = (streamCode) => {
 function ensureWalkinAttemptedAtColumn() {
     db.query(
         `ALTER TABLE walkin_final_results
-         ADD COLUMN attempted_at DATETIME NULL`,
+         ADD COLUMN attempted_at TIMESTAMP NULL`,
         (err) => {
             const msg = String(err?.message || "");
             const duplicateColumn =
@@ -141,6 +141,7 @@ router.post("/register", (req, res) => {
                 INSERT INTO students
                 (name, email_id, contact_number, dob, course, college_id)
                 VALUES (?, ?, ?, ?, ?, ?)
+                RETURNING student_id
                 `,
                 [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, cleanCollegeId],
                 (err2, result) => {
@@ -390,8 +391,8 @@ router.get("/attempted-exams/:studentId", (req, res) => {
             SELECT
                 wfr.exam_id,
                 CONCAT(COALESCE(we.stream, s.course), ' Walk-in Exam') AS exam_name,
-                DATE(COALESCE(wfr.attempted_at, CURDATE())) AS exam_start_date,
-                DATE(COALESCE(wfr.attempted_at, CURDATE())) AS exam_end_date,
+                DATE(COALESCE(wfr.attempted_at, CURRENT_DATE)) AS exam_start_date,
+                DATE(COALESCE(wfr.attempted_at, CURRENT_DATE)) AS exam_end_date,
                 COALESCE(we.stream, s.course) AS course,
                 'SUBMITTED' AS attempt_status,
                 (1000000000 + wfr.result_id) AS sort_id

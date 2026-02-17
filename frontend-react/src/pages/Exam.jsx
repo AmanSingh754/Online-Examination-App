@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 import Editor from "@monaco-editor/react";
@@ -12,8 +12,6 @@ const LANGUAGE_OPTIONS = [
 ];
 
 const INSTRUCTIONS = [
-  "Please stay in fullscreen mode throughout the exam session.",
-  "Please keep this tab active; switching tabs may be counted as a violation.",
   "When you click Next, your current answer will be saved and you can move forward.",
   "To revisit an earlier question, please use the Previous button.",
   "Please avoid refreshing or closing the browser while the exam is in progress."
@@ -81,6 +79,28 @@ const enterFullscreen = () => {
   }
 };
 
+const exitFullscreenSafe = async () => {
+  const active =
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement;
+  if (!active) return;
+
+  const exit =
+    document.exitFullscreen ||
+    document.webkitExitFullscreen ||
+    document.mozCancelFullScreen ||
+    document.msExitFullscreen;
+  if (!exit) return;
+
+  try {
+    await exit.call(document);
+  } catch (_) {
+    /* ignore fullscreen exit errors */
+  }
+};
+
 export default function Exam() {
   useBodyClass("exam-page");
   const navigate = useNavigate();
@@ -96,7 +116,6 @@ export default function Exam() {
   const [preExamOpen, setPreExamOpen] = useState(true);
   const [preExamStep, setPreExamStep] = useState(1);
   const [violations, setViolations] = useState(0);
-  const [proctorMessage, setProctorMessage] = useState("");
   const [currentSection, setCurrentSection] = useState("");
   const [visitedSections, setVisitedSections] = useState([]);
   const [pendingSection, setPendingSection] = useState("");
@@ -123,6 +142,9 @@ export default function Exam() {
   const [descriptiveLimitMessage, setDescriptiveLimitMessage] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(null);
   const [remainingSeconds, setRemainingSeconds] = useState(null);
+  const violationCooldownRef = useRef(0);
+  const autoSubmitTriggeredRef = useRef(false);
+  const focusLossActiveRef = useRef(false);
 
   const getAnswerKey = (question, languageOverride = null) => {
     if (!question) return "";
@@ -318,10 +340,20 @@ export default function Exam() {
     setLoading(true);
 
     fetch(`/exam/questions/${examId}`, { credentials: "include", signal: controller.signal })
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(data?.message || `Unable to load questions (${res.status})`);
+        }
+        return data;
+      })
       .then((data) => {
-        if (!Array.isArray(data) || data.length === 0) {
-          setError("No questions found.");
+        if (!Array.isArray(data)) {
+          setError(String(data?.message || "Invalid questions payload."));
+          return;
+        }
+        if (data.length === 0) {
+          setError("No questions found for your assigned exam stream.");
           return;
         }
         setQuestionBank(data);
@@ -340,7 +372,13 @@ export default function Exam() {
   useEffect(() => {
     if (!examId) return;
     fetch(`/exam/duration/${examId}`, { credentials: "include" })
-      .then((res) => res.json())
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(data?.message || `Unable to load exam duration (${res.status})`);
+        }
+        return data;
+      })
       .then((data) => {
         const duration = Number(data?.durationMinutes || 0);
         if (duration > 0) {
@@ -443,15 +481,15 @@ export default function Exam() {
   }, []);
 
   useEffect(() => {
-    if (preExamOpen) return;
-    if (isFullscreen) {
-      setProctorMessage("Exam session started. Keep fullscreen and stay focused.");
-    } else {
-      setProctorMessage(
-        "You left fullscreen; please go fullscreen again to avoid violations."
-      );
+    if (preExamOpen || submitSuccess || isSubmitting) return;
+    if (!isFullscreen) {
+      const timer = setTimeout(() => {
+        enterFullscreen();
+      }, 120);
+      return () => clearTimeout(timer);
     }
-  }, [isFullscreen, preExamOpen]);
+    return undefined;
+  }, [isFullscreen, preExamOpen, submitSuccess, isSubmitting]);
 
   useEffect(() => {
     fetch("/exam/walkin-coding-testcases", { credentials: "include" })
@@ -760,65 +798,197 @@ export default function Exam() {
     });
   };
 
-  const handleConfirmSubmit = async () => {
-    setIsSubmitting(true);
-    setSubmitSuccess(false);
-    const studentId = localStorage.getItem("studentId");
-    if (!studentId) {
-      setSubmitMessage("Unable to submit: student context missing. Please log in again.");
-      setIsSubmitting(false);
-      return;
-    }
-    const exceededEntry = questionBank
-      .filter((question) => (question.question_type || "").toLowerCase() === "descriptive")
-      .map((question) => {
-        const answerText = readAnswer(question);
-        const limit = getDescriptiveWordLimit(question.question_id);
-        const words = countWords(answerText);
-        return { questionId: question.question_id, limit, words };
-      })
-      .find((entry) => entry.limit && entry.words > entry.limit);
-    if (exceededEntry) {
+  const handleConfirmSubmit = useCallback(
+    async (options = {}) => {
+      const forceSubmit = Boolean(options.force);
+      if (isSubmitting) return;
+
+      setIsSubmitting(true);
       setSubmitSuccess(false);
-      setSubmitMessage(
-        `Question ${exceededEntry.questionId} exceeds word limit (${exceededEntry.words}/${exceededEntry.limit}).`
-      );
-      setIsSubmitting(false);
-      return;
-    }
-    try {
-      const payload = {
-        studentId,
-        examId,
-        studentExamId: studentExamIdParam > 0 ? studentExamIdParam : null,
-        answers: buildAnswersPayload()
-      };
-      const response = await fetch("/exam/submit", {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const data = await response.json();
-      if (response.ok && data.success) {
-        setSubmitSuccess(true);
-        setSubmitMessage("Exam submitted successfully. Please wait for results. Thank you.");
-        setTimeout(() => {
-          navigate("/student/dashboard");
-        }, 1800);
-      } else {
-        setSubmitSuccess(false);
-        setSubmitMessage(data.message || "Submission failed. Please try again.");
+      let submitCompleted = false;
+      const studentId = localStorage.getItem("studentId");
+      if (!studentId) {
+        setSubmitMessage("Unable to submit: student context missing. Please log in again.");
+        setIsSubmitting(false);
+        return;
       }
-    } catch (err) {
-      console.error("Submit exam error:", err);
-      setSubmitSuccess(false);
-      setSubmitMessage(err.message || "Submission failed. Please try again.");
-    } finally {
-      setIsSubmitting(false);
-      setSubmitConfirmOpen(false);
-    }
-  };
+      if (!forceSubmit) {
+        const exceededEntry = questionBank
+          .filter((question) => (question.question_type || "").toLowerCase() === "descriptive")
+          .map((question) => {
+            const answerText = readAnswer(question);
+            const limit = getDescriptiveWordLimit(question.question_id);
+            const words = countWords(answerText);
+            return { questionId: question.question_id, limit, words };
+          })
+          .find((entry) => entry.limit && entry.words > entry.limit);
+        if (exceededEntry) {
+          setSubmitSuccess(false);
+          setSubmitMessage(
+            `Question ${exceededEntry.questionId} exceeds word limit (${exceededEntry.words}/${exceededEntry.limit}).`
+          );
+          setIsSubmitting(false);
+          return;
+        }
+      }
+      try {
+        const payload = {
+          studentId,
+          examId,
+          studentExamId: studentExamIdParam > 0 ? studentExamIdParam : null,
+          answers: buildAnswersPayload()
+        };
+        const response = await fetch("/exam/submit", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (response.ok && data.success) {
+          submitCompleted = true;
+          await exitFullscreenSafe();
+          setSubmitSuccess(true);
+          setSubmitMessage(
+            forceSubmit
+              ? "Exam auto-submitted after 3 tab-switch violations."
+              : "Exam submitted successfully. Please wait for results. Thank you."
+          );
+          setTimeout(() => {
+            navigate("/student/dashboard");
+          }, 1800);
+        } else {
+          setSubmitSuccess(false);
+          setSubmitMessage(data.message || "Submission failed. Please try again.");
+        }
+      } catch (err) {
+        console.error("Submit exam error:", err);
+        setSubmitSuccess(false);
+        setSubmitMessage(err.message || "Submission failed. Please try again.");
+      } finally {
+        setIsSubmitting(false);
+        setSubmitConfirmOpen(false);
+      }
+    },
+    [buildAnswersPayload, examId, isSubmitting, navigate, questionBank, readAnswer, studentExamIdParam]
+  );
+
+  const registerViolation = useCallback(
+    (reason) => {
+      if (preExamOpen || isSubmitting || submitSuccess) return;
+      const now = Date.now();
+      if (now - violationCooldownRef.current < 900) return;
+      violationCooldownRef.current = now;
+
+      setViolations((prev) => {
+        const next = Math.min(prev + 1, VIOLATION_LIMIT);
+        const reasonText = String(reason || "Focus violation detected").trim();
+
+        if (next >= VIOLATION_LIMIT) {
+          setSubmitConfirmOpen(false);
+          if (!autoSubmitTriggeredRef.current) {
+            autoSubmitTriggeredRef.current = true;
+            setTimeout(() => {
+              void handleConfirmSubmit({
+                force: true,
+                reason: reasonText
+              });
+            }, 120);
+          }
+        }
+        return next;
+      });
+
+      enterFullscreen();
+      if (typeof window.focus === "function") {
+        try {
+          window.focus();
+        } catch (_) {
+          /* ignore focus errors */
+        }
+      }
+    },
+    [handleConfirmSubmit, isSubmitting, preExamOpen, submitSuccess]
+  );
+
+  useEffect(() => {
+    if (preExamOpen) return;
+    if (submitSuccess) return;
+
+    const markFocusLoss = (reason) => {
+      if (focusLossActiveRef.current) return;
+      focusLossActiveRef.current = true;
+      registerViolation(reason);
+    };
+
+    const clearFocusLoss = () => {
+      focusLossActiveRef.current = false;
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        markFocusLoss("Tab switch detected");
+      } else {
+        clearFocusLoss();
+        enterFullscreen();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      if (document.visibilityState === "visible") {
+        markFocusLoss("Window focus lost");
+      }
+    };
+
+    const handleWindowFocus = () => {
+      clearFocusLoss();
+      enterFullscreen();
+    };
+
+    const handlePageHide = () => {
+      markFocusLoss("Window hidden");
+    };
+
+    const handleKeyDown = (event) => {
+      const key = String(event.key || "").toLowerCase();
+      const ctrlOrMeta = Boolean(event.ctrlKey || event.metaKey);
+      const altTab = Boolean(event.altKey && key === "tab");
+      const blocked =
+        key === "f5" ||
+        altTab ||
+        (ctrlOrMeta && (key === "tab" || key === "w" || key === "r" || key === "l")) ||
+        (ctrlOrMeta && event.shiftKey && key === "tab");
+      if (blocked) {
+        event.preventDefault();
+        if (altTab) {
+          markFocusLoss("Alt+Tab attempt detected");
+        }
+      }
+    };
+
+    const focusGuard = setInterval(() => {
+      if (document.visibilityState === "hidden" || !document.hasFocus()) {
+        markFocusLoss("Window focus lost");
+      } else {
+        clearFocusLoss();
+      }
+    }, 1000);
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      clearInterval(focusGuard);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [preExamOpen, registerViolation, submitSuccess]);
 
   const markSaved = (questionId) => {
     if (!questionId) return;
@@ -1139,7 +1309,6 @@ export default function Exam() {
                     onClick={() => {
                       enterFullscreen();
                       setPreExamOpen(false);
-                      setProctorMessage("Exam session started. Keep fullscreen and stay focused.");
                     }}
                   >
                     Start
@@ -1237,7 +1406,10 @@ export default function Exam() {
               {violations}/{VIOLATION_LIMIT}
             </strong>
           </div>
-          <div className="chip subtle">Fullscreen active</div>
+          <div className="chip subtle">
+            <span>Fullscreen</span>
+            <strong>{isFullscreen ? "On" : "Off"}</strong>
+          </div>
           <div className="chip subtle">
             <span>Total marks</span>
             <strong>50</strong>
@@ -1264,7 +1436,6 @@ export default function Exam() {
           </button>
         </div>
       </div>
-
       {currentSection && (
         <div className="section-banner-outside">
           {sectionNavigator.sections.length > 0 && (

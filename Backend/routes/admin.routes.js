@@ -71,7 +71,7 @@ async function ensureWalkinAttemptedAtColumn() {
     try {
         await queryAsync(
             `ALTER TABLE walkin_final_results
-             ADD COLUMN attempted_at DATETIME NULL`
+             ADD COLUMN attempted_at TIMESTAMP NULL`
         );
     } catch (error) {
         const msg = String(error?.message || "");
@@ -88,7 +88,9 @@ async function ensureWalkinAttemptedAtColumn() {
 }
 
 async function loadWalkinQuestionSet(stream) {
-    const normalizedStreamKey = getWalkinStreamQuestionKey(stream);
+    const streamCode = getWalkinStreamCodeOrDefault(stream);
+    const normalizedStreamKey = getWalkinStreamQuestionKey(streamCode);
+    const includeCoding = streamCode !== "DA";
     const aptitudeRows = await queryAsync(`
         SELECT question_text, option_a, option_b, option_c, option_d, correct_option
         FROM walkin_aptitude_questions
@@ -98,7 +100,7 @@ async function loadWalkinQuestionSet(stream) {
         `
         SELECT question_text, section_name, question_type, option_a, option_b, option_c, option_d, correct_option
         FROM walkin_stream_questions
-        WHERE LOWER(REPLACE(TRIM(stream), ' ', '')) = ?
+        WHERE REGEXP_REPLACE(LOWER(COALESCE(stream::text, '')), '[^a-z0-9]+', '', 'g') = ?
         ORDER BY question_id
         `,
         [normalizedStreamKey]
@@ -158,18 +160,20 @@ async function loadWalkinQuestionSet(stream) {
     mcqRows.forEach((row) => result.push(row));
     descriptiveRows.forEach((row) => result.push(row));
 
-    codingRows.forEach((row) => {
-        result.push({
-            section_name: "Coding",
-            question_type: "Coding",
-            question_text: row.question_text,
-            option_a: "",
-            option_b: "",
-            option_c: "",
-            option_d: "",
-            correct_answer: null
+    if (includeCoding) {
+        codingRows.forEach((row) => {
+            result.push({
+                section_name: "Coding",
+                question_type: "Coding",
+                question_text: row.question_text,
+                option_a: "",
+                option_b: "",
+                option_c: "",
+                option_d: "",
+                correct_answer: null
+            });
         });
-    });
+    }
 
     return result;
 }
@@ -215,7 +219,7 @@ function ensureStudentTypeColumn() {
     const query = `
         SELECT COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE table_schema = DATABASE()
+        WHERE table_schema = current_schema()
           AND table_name = 'students'
           AND column_name = 'student_type'
     `;
@@ -231,7 +235,7 @@ function ensureStudentTypeColumn() {
         }
 
         db.query(
-            `ALTER TABLE students ADD COLUMN student_type ENUM('REGULAR','WALKIN') NOT NULL DEFAULT 'REGULAR'`,
+            `ALTER TABLE students ADD COLUMN student_type TEXT NOT NULL DEFAULT 'REGULAR'`,
             err2 => {
                 if (err2) {
                     console.error("Could not add student_type column:", err2);
@@ -249,7 +253,7 @@ function ensureWalkinExamColumn() {
     const query = `
         SELECT COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE table_schema = DATABASE()
+        WHERE table_schema = current_schema()
           AND table_name = 'students'
           AND column_name = 'walkin_exam_id'
     `;
@@ -288,13 +292,19 @@ ensureWalkinExamColumn();
 async function ensureWalkinExamForeignKey() {
     const existing = await queryAsync(
         `
-        SELECT CONSTRAINT_NAME
-        FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'students'
-          AND COLUMN_NAME = 'walkin_exam_id'
-          AND REFERENCED_TABLE_NAME = 'walkin_exams'
-          AND REFERENCED_COLUMN_NAME = 'walkin_exam_id'
+        SELECT c.conname AS constraint_name
+        FROM pg_constraint c
+        JOIN pg_class t
+          ON t.oid = c.conrelid
+        JOIN pg_namespace n
+          ON n.oid = t.relnamespace
+        JOIN pg_attribute a
+          ON a.attrelid = t.oid
+         AND a.attnum = ANY(c.conkey)
+        WHERE c.contype = 'f'
+          AND n.nspname = current_schema()
+          AND t.relname = 'students'
+          AND a.attname = 'walkin_exam_id'
         LIMIT 1
         `
     );
@@ -304,18 +314,20 @@ async function ensureWalkinExamForeignKey() {
     await queryAsync(
         `
         UPDATE students s
-        LEFT JOIN walkin_exams we
-          ON we.walkin_exam_id = s.walkin_exam_id
-        SET s.walkin_exam_id = NULL
+        SET walkin_exam_id = NULL
         WHERE s.walkin_exam_id IS NOT NULL
-          AND we.walkin_exam_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1
+              FROM walkin_exams we
+              WHERE we.walkin_exam_id = s.walkin_exam_id
+          )
         `
     );
 
     try {
         await queryAsync(
-            `ALTER TABLE students
-             ADD INDEX idx_students_walkin_exam_id (walkin_exam_id)`
+            `CREATE INDEX IF NOT EXISTS idx_students_walkin_exam_id
+             ON students (walkin_exam_id)`
         );
     } catch (error) {
         const msg = String(error?.message || "");
@@ -343,7 +355,7 @@ async function ensureWalkinExamStreamCodeColumn() {
     try {
         await queryAsync(
             `ALTER TABLE walkin_exams
-             ADD COLUMN stream_code ENUM('DS','DA','MERN') NULL`
+             ADD COLUMN stream_code TEXT NULL`
         );
     } catch (error) {
         const msg = String(error?.message || "");
@@ -358,12 +370,26 @@ async function ensureWalkinExamStreamCodeColumn() {
 
     try {
         await queryAsync(
+            `ALTER TABLE walkin_exams
+             ALTER COLUMN stream_code TYPE TEXT
+             USING stream_code::text`
+        );
+    } catch (error) {
+        const msg = String(error?.message || "");
+        const alreadyText = /cannot cast type text to text|is already of type/i.test(msg);
+        if (!alreadyText) {
+            console.warn("Could not normalize stream_code type to TEXT:", msg);
+        }
+    }
+
+    try {
+        await queryAsync(
             `
             UPDATE walkin_exams
             SET stream_code = CASE
-                WHEN UPPER(REPLACE(TRIM(stream), ' ', '')) IN ('DS', 'DATASCIENCE') THEN 'DS'
-                WHEN UPPER(REPLACE(TRIM(stream), ' ', '')) IN ('DA', 'DATAANALYTICS') THEN 'DA'
-                WHEN UPPER(REPLACE(TRIM(stream), ' ', '')) IN ('MERN', 'FULLSTACK') THEN 'MERN'
+                WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('DS', 'DATASCIENCE') THEN 'DS'
+                WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('DA', 'DATAANALYTICS') THEN 'DA'
+                WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('MERN', 'FULLSTACK') THEN 'MERN'
                 ELSE 'MERN'
             END
             WHERE stream_code IS NULL
@@ -375,8 +401,8 @@ async function ensureWalkinExamStreamCodeColumn() {
 
     try {
         await queryAsync(
-            `ALTER TABLE walkin_exams
-             ADD INDEX idx_walkin_exams_stream_code_status (stream_code, exam_status)`
+            `CREATE INDEX IF NOT EXISTS idx_walkin_exams_stream_code_status
+             ON walkin_exams (stream_code, exam_status)`
         );
     } catch (error) {
         const msg = String(error?.message || "");
@@ -399,14 +425,14 @@ ensureWalkinExamStreamCodeColumn().catch((error) => {
 function ensureQuestionColumns() {
     const required = {
         section_name: "VARCHAR(128) NOT NULL DEFAULT 'General'",
-        question_type: "ENUM('MCQ','Descriptive','Coding') NOT NULL DEFAULT 'MCQ'"
+        question_type: "TEXT NOT NULL DEFAULT 'MCQ'"
     };
 
     db.query(
         `
             SELECT COLUMN_NAME
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE table_schema = DATABASE()
+            WHERE table_schema = current_schema()
               AND table_name = 'questions'
               AND column_name IN ('section_name', 'question_type')
         `,
@@ -416,7 +442,7 @@ function ensureQuestionColumns() {
                 return;
             }
 
-            const existing = new Set((rows || []).map((row) => row.COLUMN_NAME));
+            const existing = new Set((rows || []).map((row) => row.COLUMN_NAME || row.column_name));
             Object.entries(required).forEach(([column, definition]) => {
                 if (existing.has(column)) return;
                 db.query(
@@ -557,6 +583,7 @@ router.post("/colleges", async (req, res) => {
                 `
                 INSERT INTO college (college_name)
                 VALUES (?)
+                RETURNING college_id
                 `,
                 [collegeName]
             );
@@ -575,7 +602,7 @@ router.post("/colleges", async (req, res) => {
 
             const nextIdRows = await queryAsync(
                 `
-                SELECT COALESCE(MAX(CAST(college_id AS UNSIGNED)), 0) + 1 AS next_id
+                SELECT COALESCE(MAX(college_id::bigint), 0) + 1 AS next_id
                 FROM college
                 `
             );
@@ -912,7 +939,7 @@ const updateStudentStatus = async (req, res) => {
                         SELECT walkin_exam_id
                         FROM walkin_exams
                         WHERE stream_code = ?
-                          AND UPPER(COALESCE(exam_status, 'READY')) = 'READY'
+                          AND (exam_status = 'READY' OR exam_status IS NULL)
                         ORDER BY walkin_exam_id DESC
                         LIMIT 1
                         `,
@@ -922,7 +949,9 @@ const updateStudentStatus = async (req, res) => {
 
                     if (!resolvedWalkinExamId) {
                         const createdExam = await queryAsync(
-                            `INSERT INTO walkin_exams (stream, stream_code, exam_status) VALUES (?, ?, 'READY')`,
+                            `INSERT INTO walkin_exams (stream, stream_code, exam_status)
+                             VALUES (?, ?, 'READY')
+                             RETURNING walkin_exam_id`,
                             [streamLabel, streamCode]
                         );
                         resolvedWalkinExamId = Number(createdExam?.insertId || 0);
@@ -1162,14 +1191,14 @@ router.post("/walkin/final-results/recompute", async (req, res) => {
             JOIN students s
               ON s.student_id = wsa.student_id
              AND s.student_type = 'WALK_IN'
-            WHERE (? IS NULL OR wsa.student_id = ?)
-              AND (? IS NULL OR wsa.exam_id = ?)
-              AND (? IS NULL OR s.college_id = ?)
+            WHERE (?::BIGINT IS NULL OR wsa.student_id = ?::BIGINT)
+              AND (?::BIGINT IS NULL OR wsa.exam_id = ?::BIGINT)
+              AND (?::BIGINT IS NULL OR s.college_id = ?::BIGINT)
             ORDER BY
                 wsa.student_id,
                 wsa.exam_id,
                 UPPER(COALESCE(wsa.section_name, '')),
-                UPPER(COALESCE(wsa.question_type, '')),
+                UPPER(COALESCE(wsa.question_type::text, '')),
                 wsa.question_id,
                 wsa.submission_id DESC
         `,
@@ -1234,13 +1263,13 @@ router.post("/walkin/final-results/recompute", async (req, res) => {
             INSERT INTO walkin_final_results
             (student_id, exam_id, aptitude_marks, technical_marks, coding_easy_marks, coding_medium_marks, coding_hard_marks, total_marks)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              aptitude_marks = VALUES(aptitude_marks),
-              technical_marks = VALUES(technical_marks),
-              coding_easy_marks = VALUES(coding_easy_marks),
-              coding_medium_marks = VALUES(coding_medium_marks),
-              coding_hard_marks = VALUES(coding_hard_marks),
-              total_marks = VALUES(total_marks)
+            ON CONFLICT (student_id, exam_id) DO UPDATE SET
+              aptitude_marks = EXCLUDED.aptitude_marks,
+              technical_marks = EXCLUDED.technical_marks,
+              coding_easy_marks = EXCLUDED.coding_easy_marks,
+              coding_medium_marks = EXCLUDED.coding_medium_marks,
+              coding_hard_marks = EXCLUDED.coding_hard_marks,
+              total_marks = EXCLUDED.total_marks
         `;
 
         const upserted = [];
@@ -1307,9 +1336,9 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
             SELECT wfr.student_id, wfr.exam_id
             FROM walkin_final_results wfr
             JOIN students s ON s.student_id = wfr.student_id
-            WHERE (? IS NULL OR wfr.student_id = ?)
-              AND (? IS NULL OR wfr.exam_id = ?)
-              AND (? IS NULL OR s.college_id = ?)
+            WHERE (?::BIGINT IS NULL OR wfr.student_id = ?::BIGINT)
+              AND (?::BIGINT IS NULL OR wfr.exam_id = ?::BIGINT)
+              AND (?::BIGINT IS NULL OR s.college_id = ?::BIGINT)
               AND (wfr.performance_summary IS NULL OR TRIM(wfr.performance_summary) = '')
             ORDER BY wfr.result_id DESC
             LIMIT ?
@@ -1337,7 +1366,7 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
                     SELECT
                         wsa.submission_id,
                         COALESCE(wsa.section_name, '') AS section_name,
-                        UPPER(COALESCE(wsa.question_type, '')) AS question_type,
+                        UPPER(COALESCE(wsa.question_type::text, '')) AS question_type,
                         wsa.question_id,
                         COALESCE(wsa.marks_obtained, 0) AS marks_obtained,
                         COALESCE(wsa.testcases_passed, 0) AS testcases_passed,
@@ -1352,7 +1381,7 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
                         FROM walkin_student_answers
                         WHERE student_id = ?
                           AND exam_id = ?
-                        GROUP BY question_id, UPPER(COALESCE(question_type, '')), UPPER(COALESCE(section_name, ''))
+                        GROUP BY question_id, UPPER(COALESCE(question_type::text, '')), UPPER(COALESCE(section_name, ''))
                     ) latest ON latest.submission_id = wsa.submission_id
                     LEFT JOIN walkin_aptitude_questions wa
                         ON wa.question_id = wsa.question_id
@@ -1475,7 +1504,7 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
                 ) AS full_marks,
                 COALESCE(
                     CASE
-                        WHEN wc.question_id IS NOT NULL THEN JSON_LENGTH(wc.testcases)
+                        WHEN wc.question_id IS NOT NULL THEN jsonb_array_length(COALESCE(wc.testcases, '[]'::jsonb))
                         ELSE NULL
                     END,
                     0
@@ -1488,8 +1517,8 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
                     WHEN wc.question_id IS NOT NULL THEN 'Coding'
                     WHEN ws.question_id IS NOT NULL THEN 'Technical'
                     WHEN wa.question_id IS NOT NULL THEN 'Aptitude'
-                    WHEN LOWER(COALESCE(q.question_type, '')) = 'coding' THEN 'Coding'
-                    WHEN LOWER(COALESCE(q.section_name, '')) LIKE '%aptitude%' THEN 'Aptitude'
+                    WHEN LOWER(COALESCE(q.question_type::text, '')) = 'coding' THEN 'Coding'
+                    WHEN LOWER(COALESCE(q.section_name::text, '')) LIKE '%aptitude%' THEN 'Aptitude'
                     WHEN q.question_id IS NOT NULL THEN 'Technical'
                     ELSE 'Unknown'
                 END AS section_label
@@ -1499,7 +1528,7 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
                 FROM walkin_student_answers
                 WHERE student_id = ?
                   AND exam_id = ?
-                GROUP BY UPPER(COALESCE(section_name, '')), UPPER(COALESCE(question_type, '')), question_id
+                GROUP BY UPPER(COALESCE(section_name, '')), UPPER(COALESCE(question_type::text, '')), question_id
             ) latest ON latest.submission_id = wsa.submission_id
             LEFT JOIN walkin_aptitude_questions wa
                 ON wa.question_id = wsa.question_id
@@ -1517,7 +1546,7 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
                 ON wc.question_id = wsa.question_id
                AND (
                     UPPER(COALESCE(wsa.section_name, '')) = 'CODING'
-                    OR UPPER(COALESCE(wsa.question_type, '')) = 'CODING'
+                    OR UPPER(COALESCE(wsa.question_type::text, '')) = 'CODING'
                )
             LEFT JOIN questions q
                 ON q.question_id = wsa.question_id
@@ -1611,7 +1640,7 @@ router.post("/students/walkin", (req, res) => {
                 SELECT walkin_exam_id
                 FROM walkin_exams
                 WHERE stream_code = ?
-                  AND UPPER(COALESCE(exam_status, 'READY')) = 'READY'
+                  AND (exam_status = 'READY' OR exam_status IS NULL)
                 LIMIT 1
                 `,
                 [streamCode],
@@ -1626,6 +1655,7 @@ router.post("/students/walkin", (req, res) => {
                 INSERT INTO students
                 (name, email_id, contact_number, dob, course, college_id, student_type, walkin_exam_id)
                 VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
+                RETURNING student_id
                 `,
                             [name.trim(), email.trim(), phone.trim(), dob, streamLabel, collegeId, walkinExamId],
                             (err2, result) => {
@@ -1663,7 +1693,8 @@ router.post("/students/walkin", (req, res) => {
                         INSERT INTO student_credentials
                         (student_id, password, role_id)
                         VALUES (?, ?, 1)
-                        ON DUPLICATE KEY UPDATE password = VALUES(password)
+                        ON CONFLICT (student_id) DO UPDATE
+                        SET password = EXCLUDED.password
                         `,
                         [newStudentId, autoPassword],
                         (err3) => {
@@ -1695,6 +1726,7 @@ router.post("/students/walkin", (req, res) => {
                         `
                         INSERT INTO walkin_exams (stream, stream_code, exam_status)
                         VALUES (?, ?, 'READY')
+                        RETURNING walkin_exam_id
                         `,
                         [streamLabel, streamCode],
                         (createExamErr, createExamResult) => {
@@ -1768,6 +1800,7 @@ router.post("/students/regular", (req, res) => {
                 INSERT INTO students
                 (name, email_id, contact_number, dob, course, college_id, student_type)
                 VALUES (?, ?, ?, ?, ?, ?, 'REGULAR')
+                RETURNING student_id
                 `,
                 [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, selectedCollegeId],
                 (err2, result) => {
@@ -1955,7 +1988,8 @@ router.post("/exam", (req, res) => {
 
             db.query(
                 `INSERT INTO exams (course, exam_status, start_at, end_at, cutoff, duration_minutes, question_count)
-                 VALUES (?, 'READY', ?, ?, ?, ?, ?)`,
+                 VALUES (?, 'READY', ?, ?, ?, ?, ?)
+                 RETURNING exam_id`,
                 [payloadValue, startAt, endAt, cutoffValue, durationValue, questionCountValue],
                 (insertErr, result) => {
                     if (insertErr) {

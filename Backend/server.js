@@ -1,10 +1,10 @@
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 process.env.TZ = process.env.APP_TIMEZONE || "Asia/Kolkata";
 const express = require("express");
 const session = require("express-session");
-const path = require("path");
 const fs = require("fs");
-const MySQLSessionStore = require("./mysqlSessionStore");
+// const MySQLSessionStore = require("./mysqlSessionStore");
 
 
 const studentRoutes = require("./routes/student.routes");
@@ -13,17 +13,18 @@ const adminRoutes = require("./routes/admin.routes");
 
 const app = express();
 const sessionTtlMs = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 8);
-const sessionStore = new MySQLSessionStore({
-    host: process.env.DB_HOST || "localhost",
-    port: Number(process.env.DB_PORT || 3306),
-    user: process.env.DB_USER || "root",
-    password: process.env.DB_PASSWORD || "12345",
-    database: process.env.DB_NAME || "Project1",
-    timezone: process.env.DB_TIMEZONE || "+05:30",
-    tableName: process.env.SESSION_TABLE_NAME || "user_sessions",
-    ttlMs: sessionTtlMs,
-    cleanupMs: Number(process.env.SESSION_CLEANUP_MS || 1000 * 60 * 15)
-});
+// const sessionStore = new MySQLSessionStore({
+//     host: process.env.DB_HOST || "localhost",
+//     port: Number(process.env.DB_PORT || 3306),
+//     user: process.env.DB_USER || "root",
+//     password: process.env.DB_PASSWORD || "12345",
+//     database: process.env.DB_NAME || "Project1",
+//     timezone: process.env.DB_TIMEZONE || "+05:30",
+//     tableName: process.env.SESSION_TABLE_NAME || "user_sessions",
+//     ttlMs: sessionTtlMs,
+//     cleanupMs: Number(process.env.SESSION_CLEANUP_MS || 1000 * 60 * 15)
+// });
+const sessionStore = new session.MemoryStore();
 app.locals.sessionStore = sessionStore;
 
 const reactDist = path.join(__dirname, "../frontend-react/dist");

@@ -156,8 +156,40 @@ function AdminDashboard() {
   }, [landingSection, location.pathname, location.search, navigate]);
   const [revealedPasswords, setRevealedPasswords] = useState({});
   const [detailLoading, setDetailLoading] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false,
+    title: "",
+    message: "",
+    confirmLabel: "Confirm",
+    cancelLabel: "Cancel",
+    tone: "default"
+  });
+  const confirmResolverRef = useRef(null);
 
   const activeSectionRef = useRef(activeSection);
+
+  const openConfirmDialog = useCallback((options) => {
+    return new Promise((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmDialog({
+        open: true,
+        title: options?.title || "Please confirm",
+        message: options?.message || "",
+        confirmLabel: options?.confirmLabel || "Confirm",
+        cancelLabel: options?.cancelLabel || "Cancel",
+        tone: options?.tone === "danger" ? "danger" : "default"
+      });
+    });
+  }, []);
+
+  const resolveConfirmDialog = useCallback((confirmed) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmDialog((prev) => ({ ...prev, open: false }));
+    if (typeof resolver === "function") {
+      resolver(Boolean(confirmed));
+    }
+  }, []);
 
   useEffect(() => {
     if (!adminId) {
@@ -527,7 +559,13 @@ function AdminDashboard() {
   };
 
   const handleDeleteExam = async (examId) => {
-    if (!window.confirm("Delete this exam?")) return;
+    const confirmed = await openConfirmDialog({
+      title: "Delete this exam?",
+      message: "This will permanently remove this exam and all linked questions.",
+      confirmLabel: "Delete",
+      tone: "danger"
+    });
+    if (!confirmed) return;
     await fetch(`/admin/exam/${examId}`, { method: "DELETE" });
     loadExams();
   };
@@ -558,11 +596,21 @@ function AdminDashboard() {
   const handleWalkinStatusToggle = async (studentId, currentStatus) => {
     const normalizedCurrentStatus = String(currentStatus || "").trim().toUpperCase();
     const nextStatus = normalizedCurrentStatus === "ACTIVE" ? "INACTIVE" : "ACTIVE";
-    const confirmMessage =
+    const confirmConfig =
       nextStatus === "ACTIVE"
-        ? "Activate this student?\n\nThey will be able to see and attempt the exam again on their dashboard."
-        : "Deactivate this student?\n\nTheir exam will be removed from the student dashboard until activated again.";
-    const confirmed = window.confirm(confirmMessage);
+        ? {
+            title: "Activate this student?",
+            message: "The student will regain exam access on their dashboard.",
+            confirmLabel: "Activate",
+            tone: "default"
+          }
+        : {
+            title: "Deactivate this student?",
+            message: "The assigned exam will be hidden from the dashboard until you activate the student again.",
+            confirmLabel: "Deactivate",
+            tone: "danger"
+          };
+    const confirmed = await openConfirmDialog(confirmConfig);
     if (!confirmed) {
       return;
     }
@@ -2192,6 +2240,37 @@ function AdminDashboard() {
                 <div className="profile-item">
                   <span className="profile-label">Role</span>
                   <span className="profile-value">Administrator</span>
+                </div>
+              </div>
+            </div>
+          )}
+          {confirmDialog.open && (
+            <div
+              className="admin-confirm-overlay"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-confirm-title"
+              aria-describedby="admin-confirm-message"
+              onClick={() => resolveConfirmDialog(false)}
+            >
+              <div className="admin-confirm-card" onClick={(event) => event.stopPropagation()}>
+                <h3 id="admin-confirm-title">{confirmDialog.title}</h3>
+                <p id="admin-confirm-message">{confirmDialog.message}</p>
+                <div className="admin-confirm-actions">
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => resolveConfirmDialog(false)}
+                  >
+                    {confirmDialog.cancelLabel}
+                  </button>
+                  <button
+                    type="button"
+                    className={`admin-confirm-btn ${confirmDialog.tone === "danger" ? "danger" : ""}`}
+                    onClick={() => resolveConfirmDialog(true)}
+                  >
+                    {confirmDialog.confirmLabel}
+                  </button>
                 </div>
               </div>
             </div>

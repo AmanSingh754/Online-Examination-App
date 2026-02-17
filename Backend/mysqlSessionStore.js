@@ -1,5 +1,5 @@
 const session = require("express-session");
-const mysql = require("mysql2/promise");
+const { Pool } = require("pg");
 
 class MySQLSessionStore extends session.Store {
     constructor(options = {}) {
@@ -7,17 +7,15 @@ class MySQLSessionStore extends session.Store {
         this.ttlMs = Number(options.ttlMs || 1000 * 60 * 60 * 8);
         this.tableName = String(options.tableName || "user_sessions");
         this.cleanupMs = Number(options.cleanupMs || 1000 * 60 * 15);
-        this.dbTimezone = String(options.timezone || "+05:30");
-        this.pool = mysql.createPool({
-            host: options.host || "localhost",
-            port: Number(options.port || 3306),
-            user: options.user || "root",
-            password: options.password || "12345",
-            database: options.database || "Project1",
-            timezone: this.dbTimezone,
-            waitForConnections: true,
-            connectionLimit: 10,
-            queueLimit: 0
+        this.pool = new Pool({
+            host: options.host || process.env.PG_HOST || "localhost",
+            port: Number(options.port || process.env.PG_PORT || 5432),
+            user: options.user || process.env.PG_USER || "postgres",
+            password: options.password || process.env.PG_PASSWORD || "",
+            database: options.database || process.env.PG_DATABASE || "postgres",
+            ssl: options.ssl || undefined,
+            max: Number(options.max || 10),
+            idleTimeoutMillis: Number(options.idleTimeoutMillis || 30000)
         });
         this.ready = this.ensureTable();
         this.cleanupTimer = setInterval(() => {
@@ -29,16 +27,17 @@ class MySQLSessionStore extends session.Store {
     }
 
     async ensureTable() {
-        await this.pool.query("SET time_zone = ?", [this.dbTimezone]);
         const sql = `
             CREATE TABLE IF NOT EXISTS ${this.tableName} (
                 session_id VARCHAR(128) NOT NULL PRIMARY KEY,
-                expires BIGINT UNSIGNED NOT NULL,
-                data MEDIUMTEXT NOT NULL,
-                INDEX idx_${this.tableName}_expires (expires)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                expires BIGINT NOT NULL,
+                data TEXT NOT NULL
+            )
         `;
         await this.pool.query(sql);
+        await this.pool.query(
+            `CREATE INDEX IF NOT EXISTS idx_${this.tableName}_expires ON ${this.tableName} (expires)`
+        );
     }
 
     computeExpires(sessionData) {
@@ -55,8 +54,8 @@ class MySQLSessionStore extends session.Store {
     get(sid, callback) {
         this.ready
             .then(async () => {
-                const [rows] = await this.pool.query(
-                    `SELECT data, expires FROM ${this.tableName} WHERE session_id = ? LIMIT 1`,
+                const { rows } = await this.pool.query(
+                    `SELECT data, expires FROM ${this.tableName} WHERE session_id = $1 LIMIT 1`,
                     [sid]
                 );
                 if (!rows || rows.length === 0) {
@@ -67,7 +66,7 @@ class MySQLSessionStore extends session.Store {
                 const expires = Number(row.expires || 0);
                 if (expires <= Date.now()) {
                     await this.pool.query(
-                        `DELETE FROM ${this.tableName} WHERE session_id = ?`,
+                        `DELETE FROM ${this.tableName} WHERE session_id = $1`,
                         [sid]
                     );
                     return callback(null, null);
@@ -78,7 +77,7 @@ class MySQLSessionStore extends session.Store {
                     return callback(null, parsed);
                 } catch (error) {
                     await this.pool.query(
-                        `DELETE FROM ${this.tableName} WHERE session_id = ?`,
+                        `DELETE FROM ${this.tableName} WHERE session_id = $1`,
                         [sid]
                     );
                     return callback(error);
@@ -96,10 +95,10 @@ class MySQLSessionStore extends session.Store {
                 this.pool.query(
                     `
                     INSERT INTO ${this.tableName} (session_id, expires, data)
-                    VALUES (?, ?, ?)
-                    ON DUPLICATE KEY UPDATE
-                        expires = VALUES(expires),
-                        data = VALUES(data)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (session_id) DO UPDATE
+                    SET expires = EXCLUDED.expires,
+                        data = EXCLUDED.data
                     `,
                     [sid, expires, payload]
                 )
@@ -113,7 +112,7 @@ class MySQLSessionStore extends session.Store {
         this.ready
             .then(() =>
                 this.pool.query(
-                    `UPDATE ${this.tableName} SET expires = ? WHERE session_id = ?`,
+                    `UPDATE ${this.tableName} SET expires = $1 WHERE session_id = $2`,
                     [expires, sid]
                 )
             )
@@ -125,7 +124,7 @@ class MySQLSessionStore extends session.Store {
         this.ready
             .then(() =>
                 this.pool.query(
-                    `DELETE FROM ${this.tableName} WHERE session_id = ?`,
+                    `DELETE FROM ${this.tableName} WHERE session_id = $1`,
                     [sid]
                 )
             )
@@ -143,7 +142,7 @@ class MySQLSessionStore extends session.Store {
     async clearExpired() {
         await this.ready;
         await this.pool.query(
-            `DELETE FROM ${this.tableName} WHERE expires <= ?`,
+            `DELETE FROM ${this.tableName} WHERE expires <= $1`,
             [Date.now()]
         );
     }
