@@ -19,6 +19,7 @@ const isWalkinCourse = (value) => Boolean(getCanonicalWalkinStreamCode(value));
 let walkinAnswerSectionColumnChecked = false;
 let walkinAttemptedAtColumnChecked = false;
 let walkinExamStreamCodeColumnChecked = false;
+let adminStartupSchemaSyncAttempted = false;
 const IST_OFFSET_MINUTES = 5.5 * 60;
 const TWENTY_FOUR_HOUR_TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
@@ -247,8 +248,6 @@ function ensureStudentTypeColumn() {
     });
 }
 
-ensureStudentTypeColumn();
-
 function ensureWalkinExamColumn() {
     const query = `
         SELECT COLUMN_NAME
@@ -286,8 +285,6 @@ function ensureWalkinExamColumn() {
         );
     });
 }
-
-ensureWalkinExamColumn();
 
 async function ensureWalkinExamForeignKey() {
     const existing = await queryAsync(
@@ -418,10 +415,6 @@ async function ensureWalkinExamStreamCodeColumn() {
     walkinExamStreamCodeColumnChecked = true;
 }
 
-ensureWalkinExamStreamCodeColumn().catch((error) => {
-    console.warn("walkin_exams stream_code normalization setup failed:", String(error?.message || error));
-});
-
 function ensureQuestionColumns() {
     const required = {
         section_name: "VARCHAR(128) NOT NULL DEFAULT 'General'",
@@ -460,7 +453,28 @@ function ensureQuestionColumns() {
     );
 }
 
-ensureQuestionColumns();
+async function runAdminStartupSchemaSync() {
+    if (adminStartupSchemaSyncAttempted) return;
+    adminStartupSchemaSyncAttempted = true;
+
+    try {
+        await queryAsync(`SELECT 1`);
+    } catch (error) {
+        console.warn("Skipping admin startup schema sync because PostgreSQL is unreachable:", String(error?.message || error));
+        return;
+    }
+
+    ensureStudentTypeColumn();
+    ensureWalkinExamColumn();
+    ensureWalkinExamStreamCodeColumn().catch((error) => {
+        console.warn("walkin_exams stream_code normalization setup failed:", String(error?.message || error));
+    });
+    ensureQuestionColumns();
+}
+
+runAdminStartupSchemaSync().catch((error) => {
+    console.warn("Admin startup schema sync failed:", String(error?.message || error));
+});
 
 /* ================= ADMIN LOGIN API ================= */
 router.post("/login", (req, res) => {
@@ -497,6 +511,10 @@ router.post("/logout", (req, res) => {
         return res.json({ success: true });
     }
     req.session.destroy(() => res.json({ success: true }));
+});
+
+router.get("/", (req, res) => {
+    res.redirect("/admin/login");
 });
 
 /* ================= AUTH ================= */
@@ -578,7 +596,7 @@ router.post("/colleges", async (req, res) => {
             return res.status(409).json({ success: false, message: "College already exists" });
         }
 
-        try {
+        const insertWithDefaultId = async () => {
             const result = await queryAsync(
                 `
                 INSERT INTO college (college_name)
@@ -587,40 +605,89 @@ router.post("/colleges", async (req, res) => {
                 `,
                 [collegeName]
             );
+            return Number(result?.insertId || result?.[0]?.college_id || 0) || null;
+        };
+
+        const syncCollegeIdSequence = async () => {
+            await queryAsync(
+                `
+                SELECT setval(
+                    pg_get_serial_sequence('college', 'college_id'),
+                    COALESCE((SELECT MAX(college_id)::bigint FROM college), 0) + 1,
+                    false
+                )
+                `
+            );
+        };
+
+        try {
+            const createdCollegeId = await insertWithDefaultId();
             return res.json({
                 success: true,
-                collegeId: result?.insertId || null,
+                collegeId: createdCollegeId,
                 collegeName
             });
         } catch (insertError) {
+            const insertErrMsg = String(insertError?.sqlMessage || insertError?.message || "");
+            const insertErrCode = String(insertError?.code || "");
             const missingDefaultCollegeId =
-                Number(insertError?.errno) === 1364 &&
-                /college_id/i.test(String(insertError?.sqlMessage || insertError?.message || ""));
+                (
+                    Number(insertError?.errno) === 1364 ||
+                    insertErrCode === "23502"
+                ) &&
+                /college_id/i.test(insertErrMsg);
+            const duplicateCollegePrimaryKey =
+                insertErrCode === "23505" &&
+                /college_pkey|college_id/i.test(insertErrMsg);
+
+            if (duplicateCollegePrimaryKey) {
+                await syncCollegeIdSequence();
+                const createdCollegeId = await insertWithDefaultId();
+                return res.json({
+                    success: true,
+                    collegeId: createdCollegeId,
+                    collegeName
+                });
+            }
+
             if (!missingDefaultCollegeId) {
                 throw insertError;
             }
 
-            const nextIdRows = await queryAsync(
-                `
-                SELECT COALESCE(MAX(college_id::bigint), 0) + 1 AS next_id
-                FROM college
-                `
-            );
-            const nextId = String(Number(nextIdRows?.[0]?.next_id || 1));
+            for (let attempt = 0; attempt < 3; attempt += 1) {
+                const nextIdRows = await queryAsync(
+                    `
+                    SELECT COALESCE(MAX(college_id::bigint), 0) + 1 AS next_id
+                    FROM college
+                    `
+                );
+                const nextId = String(Number(nextIdRows?.[0]?.next_id || 1));
 
-            await queryAsync(
-                `
-                INSERT INTO college (college_id, college_name)
-                VALUES (?, ?)
-                `,
-                [nextId, collegeName]
-            );
+                try {
+                    await queryAsync(
+                        `
+                        INSERT INTO college (college_id, college_name)
+                        VALUES (?, ?)
+                        `,
+                        [nextId, collegeName]
+                    );
 
-            return res.json({
-                success: true,
-                collegeId: nextId,
-                collegeName
-            });
+                    return res.json({
+                        success: true,
+                        collegeId: nextId,
+                        collegeName
+                    });
+                } catch (manualInsertError) {
+                    const manualErrCode = String(manualInsertError?.code || "");
+                    const manualErrMsg = String(manualInsertError?.sqlMessage || manualInsertError?.message || "");
+                    const duplicateManualPk =
+                        manualErrCode === "23505" &&
+                        /college_pkey|college_id/i.test(manualErrMsg);
+                    if (!duplicateManualPk || attempt === 2) {
+                        throw manualInsertError;
+                    }
+                }
+            }
         }
     } catch (error) {
         console.error("Create college error:", error);
@@ -777,8 +844,16 @@ router.get("/exams/active-count/:collegeId", (req, res) => {
 
 /* ================= RECENT RESULTS ================= */
 router.get("/results/:collegeId", (req, res) => {
-    db.query(
-        `
+    const rawCollegeId = String(req.params.collegeId || "").trim();
+    const wantsAllColleges =
+        !rawCollegeId ||
+        /^all$/i.test(rawCollegeId) ||
+        rawCollegeId === "*";
+    const parsedCollegeId = Number(rawCollegeId);
+    if (!wantsAllColleges && (!Number.isFinite(parsedCollegeId) || parsedCollegeId <= 0)) {
+        return res.json([]);
+    }
+    const baseSql = `
         SELECT r.result_id,
                r.student_id,
                s.name AS student_name,
@@ -814,11 +889,19 @@ router.get("/results/:collegeId", (req, res) => {
             FROM questions
             GROUP BY exam_id
         ) q ON q.exam_id = e.exam_id
-        WHERE s.college_id = ?
-        ORDER BY r.result_id DESC
-        LIMIT 10
-        `,
-        [req.params.collegeId],
+    `;
+    const sql = wantsAllColleges
+        ? `${baseSql}
+           ORDER BY r.result_id DESC
+           LIMIT 10`
+        : `${baseSql}
+           WHERE s.college_id = ?
+           ORDER BY r.result_id DESC
+           LIMIT 10`;
+    const params = wantsAllColleges ? [] : [parsedCollegeId];
+    db.query(
+        sql,
+        params,
         (err, rows) => {
             if (err) {
                 console.error("Results load error:", err);
@@ -866,8 +949,17 @@ router.get("/result-answers/:resultId", (req, res) => {
 
 /* ================= STUDENT PROFILES ================= */
 router.get("/students/:collegeId", (req, res) => {
-    db.query(
-        `
+    const rawCollegeId = String(req.params.collegeId || "").trim();
+    const wantsAllColleges =
+        !rawCollegeId ||
+        /^all$/i.test(rawCollegeId) ||
+        rawCollegeId === "*";
+    const parsedCollegeId = Number(rawCollegeId);
+    if (!wantsAllColleges && (!Number.isFinite(parsedCollegeId) || parsedCollegeId <= 0)) {
+        return res.json([]);
+    }
+
+    const baseSelect = `
         SELECT s.student_id,
                s.name,
                s.email_id,
@@ -876,8 +968,8 @@ router.get("/students/:collegeId", (req, res) => {
                s.dob,
                sc.password,
                CASE
-                   WHEN s.student_type = 'WALK_IN' THEN 'WALKIN'
-                   WHEN s.student_type = 'REGULAR' THEN 'REGULAR'
+                   WHEN UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN') THEN 'WALKIN'
+                   WHEN UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) = 'REGULAR' THEN 'REGULAR'
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.course, '')), ' ', '')) IN
                         ('DS', 'DATASCIENCE', 'DA', 'DATAANALYTICS', 'MERN', 'FULLSTACK') THEN 'WALKIN'
                    ELSE 'REGULAR'
@@ -885,10 +977,14 @@ router.get("/students/:collegeId", (req, res) => {
                 s.status AS student_status
         FROM students s
         LEFT JOIN student_credentials sc ON sc.student_id = s.student_id
-        WHERE s.college_id = ?
-        ORDER BY s.name
-        `,
-        [req.params.collegeId],
+    `;
+    const sql = wantsAllColleges
+        ? `${baseSelect} ORDER BY s.name`
+        : `${baseSelect} WHERE s.college_id = ? ORDER BY s.name`;
+    const params = wantsAllColleges ? [] : [parsedCollegeId];
+    db.query(
+        sql,
+        params,
         (err, rows) => {
             if (err) {
                 console.error("Student list error:", err);
@@ -916,56 +1012,8 @@ const updateStudentStatus = async (req, res) => {
             return res.status(404).json({ success: false, message: "Student not found" });
         }
 
-        if (normalized === "ACTIVE") {
-            const studentRows = await queryAsync(
-                `SELECT student_type, course, walkin_exam_id FROM students WHERE student_id = ? LIMIT 1`,
-                [studentId]
-            );
-            const student = studentRows?.[0] || null;
-            const type = String(student?.student_type || "").trim().toUpperCase().replace(/[\s-]/g, "_");
-            const isWalkinType =
-                type === "WALKIN" ||
-                type === "WALK_IN" ||
-                type === "WALK_INN" ||
-                type === "WALK_IN_STUDENT";
-            const currentWalkinExamId = Number(student?.walkin_exam_id || 0);
-
-            if (isWalkinType && !currentWalkinExamId) {
-                const streamCode = getCanonicalWalkinStreamCode(student?.course);
-                if (streamCode) {
-                    const streamLabel = getWalkinStreamLabel(streamCode);
-                    const existingExamRows = await queryAsync(
-                        `
-                        SELECT walkin_exam_id
-                        FROM walkin_exams
-                        WHERE stream_code = ?
-                          AND (exam_status = 'READY' OR exam_status IS NULL)
-                        ORDER BY walkin_exam_id DESC
-                        LIMIT 1
-                        `,
-                        [streamCode]
-                    );
-                    let resolvedWalkinExamId = Number(existingExamRows?.[0]?.walkin_exam_id || 0);
-
-                    if (!resolvedWalkinExamId) {
-                        const createdExam = await queryAsync(
-                            `INSERT INTO walkin_exams (stream, stream_code, exam_status)
-                             VALUES (?, ?, 'READY')
-                             RETURNING walkin_exam_id`,
-                            [streamLabel, streamCode]
-                        );
-                        resolvedWalkinExamId = Number(createdExam?.insertId || 0);
-                    }
-
-                    if (resolvedWalkinExamId) {
-                        await queryAsync(
-                            `UPDATE students SET walkin_exam_id = ? WHERE student_id = ?`,
-                            [resolvedWalkinExamId, studentId]
-                        );
-                    }
-                }
-            }
-        }
+        // Walk-in exam IDs are no longer pre-assigned on activation.
+        // A fresh walkin_exam_id is allocated only at successful submission time.
 
         const readRows = await queryAsync(
             `SELECT status, walkin_exam_id FROM students WHERE student_id = ? LIMIT 1`,
@@ -1041,9 +1089,14 @@ router.post("/walkin/grade-descriptive", async (req, res) => {
 
 router.get("/walkin/results/:collegeId", async (req, res) => {
     const { collegeId } = req.params;
+    const rawCollegeId = String(collegeId || "").trim();
+    const wantsAllColleges = !rawCollegeId || /^all$/i.test(rawCollegeId) || rawCollegeId === "*";
+    const parsedCollegeId = Number(rawCollegeId);
+    if (!wantsAllColleges && (!Number.isFinite(parsedCollegeId) || parsedCollegeId <= 0)) {
+        return res.json([]);
+    }
     try {
-        const rows = await queryAsync(
-            `
+        const baseSql = `
             SELECT wsa.student_id,
                    s.name,
                    wsa.exam_id,
@@ -1052,13 +1105,17 @@ router.get("/walkin/results/:collegeId", async (req, res) => {
             FROM walkin_student_answers wsa
             JOIN students s ON s.student_id = wsa.student_id
             LEFT JOIN walkin_stream_questions ws ON ws.question_id = wsa.question_id
-            WHERE s.college_id = ?
-              AND s.student_type = 'WALK_IN'
+            WHERE UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN')
+        `;
+        const scopedSql = wantsAllColleges
+            ? `${baseSql}
             GROUP BY wsa.student_id, wsa.exam_id
-            ORDER BY s.name, wsa.exam_id
-        `,
-            [collegeId]
-        );
+             ORDER BY s.name, wsa.exam_id`
+            : `${baseSql}
+             AND s.college_id = ?
+             GROUP BY wsa.student_id, wsa.exam_id
+             ORDER BY s.name, wsa.exam_id`;
+        const rows = await queryAsync(scopedSql, wantsAllColleges ? [] : [parsedCollegeId]);
         res.json(rows || []);
     } catch (error) {
         console.error("Walk-in results error:", error);
@@ -1068,20 +1125,28 @@ router.get("/walkin/results/:collegeId", async (req, res) => {
 
 router.get("/walkin/final-results/:collegeId", async (req, res) => {
     const { collegeId } = req.params;
+    const rawCollegeId = String(collegeId || "").trim();
+    const wantsAllColleges = !rawCollegeId || /^all$/i.test(rawCollegeId) || rawCollegeId === "*";
+    const parsedCollegeId = Number(rawCollegeId);
+    if (!wantsAllColleges && (!Number.isFinite(parsedCollegeId) || parsedCollegeId <= 0)) {
+        return res.json([]);
+    }
     try {
         await ensureWalkinAttemptedAtColumn();
-        const rows = await queryAsync(
-            `
-            SELECT wfr.*, s.name, COALESCE(we.stream, s.course) AS stream
+        const baseSql = `
+            SELECT wfr.*, s.name, s.college_id, COALESCE(we.stream, s.course) AS stream
             FROM walkin_final_results wfr
             JOIN students s ON s.student_id = wfr.student_id
             LEFT JOIN walkin_exams we ON we.walkin_exam_id = wfr.exam_id
-            WHERE s.college_id = ?
-              AND s.student_type = 'WALK_IN'
-            ORDER BY COALESCE(wfr.attempted_at, '1970-01-01 00:00:00') DESC, wfr.result_id DESC
-        `,
-            [collegeId]
-        );
+            WHERE UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN')
+        `;
+        const scopedSql = wantsAllColleges
+            ? `${baseSql}
+             ORDER BY COALESCE(wfr.attempted_at, '1970-01-01 00:00:00') DESC, wfr.result_id DESC`
+            : `${baseSql}
+             AND s.college_id = ?
+             ORDER BY COALESCE(wfr.attempted_at, '1970-01-01 00:00:00') DESC, wfr.result_id DESC`;
+        const rows = await queryAsync(scopedSql, wantsAllColleges ? [] : [parsedCollegeId]);
         res.json(rows || []);
     } catch (error) {
         console.error("Walk-in final results error:", error);
@@ -1368,11 +1433,14 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
                         COALESCE(wsa.section_name, '') AS section_name,
                         UPPER(COALESCE(wsa.question_type::text, '')) AS question_type,
                         wsa.question_id,
+                        COALESCE(wsa.descriptive_answer, '') AS descriptive_answer,
                         COALESCE(wsa.marks_obtained, 0) AS marks_obtained,
                         COALESCE(wsa.testcases_passed, 0) AS testcases_passed,
                         wa.question_id AS aptitude_qid,
                         wc.question_id AS coding_qid,
                         COALESCE(wa.marks, ws.marks, wc.marks, 0) AS full_marks,
+                        COALESCE(wa.question_text, ws.question_text, wc.question_text, '') AS question_text,
+                        COALESCE(ws.descriptive_answer, '') AS reference_descriptive_answer,
                         LOWER(COALESCE(wc.difficulty, '')) AS coding_difficulty,
                         wc.testcases AS coding_testcases
                     FROM walkin_student_answers wsa
@@ -1412,7 +1480,10 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
                         full_marks: Number(row.full_marks || 0),
                         coding_difficulty: String(row.coding_difficulty || ""),
                         testcases_passed: Number(row.testcases_passed || 0),
-                        total_testcases: isCoding ? parseTestcaseCount(row.coding_testcases) : 0
+                        total_testcases: isCoding ? parseTestcaseCount(row.coding_testcases) : 0,
+                        question_text: String(row.question_text || ""),
+                        descriptive_answer: String(row.descriptive_answer || ""),
+                        reference_answer: String(row.reference_descriptive_answer || "")
                     };
                 });
 
@@ -1621,11 +1692,26 @@ router.post("/students/walkin", (req, res) => {
     if (!collegeId) {
         return res.status(400).json({ success: false, message: "College is required" });
     }
+    if (!Number.isFinite(Number(collegeId)) || Number(collegeId) <= 0) {
+        return res.status(400).json({ success: false, message: "Invalid college selection" });
+    }
 
     db.query(
-        `SELECT student_id FROM students WHERE email_id = ?`,
-        [email],
-        (err, rows) => {
+        `SELECT college_id FROM college WHERE college_id = ? LIMIT 1`,
+        [Number(collegeId)],
+        (collegeErr, collegeRows) => {
+            if (collegeErr) {
+                console.error("Walk-in college validation error:", collegeErr);
+                return res.status(500).json({ success: false, message: "Server error" });
+            }
+            if (!collegeRows || collegeRows.length === 0) {
+                return res.status(400).json({ success: false, message: "Selected college not found" });
+            }
+
+            db.query(
+                `SELECT student_id FROM students WHERE email_id = ?`,
+                [email],
+                (err, rows) => {
             if (err) {
                 console.error("Walk-in lookup error:", err);
                 return res.status(500).json({ success: false, message: "Server error" });
@@ -1646,18 +1732,17 @@ router.post("/students/walkin", (req, res) => {
                 [streamCode],
                 (examLookupErr, examRows) => {
                     if (examLookupErr) {
-                        console.error("Walk-in exam lookup error:", examLookupErr);
-                        return res.status(500).json({ success: false, message: "Could not map walk-in exam" });
+                        console.warn("Walk-in exam lookup skipped:", examLookupErr);
                     }
-                    const createStudentWithWalkinExam = (walkinExamId) => {
+                    const createStudentWithWalkinExam = () => {
                         db.query(
                             `
                 INSERT INTO students
-                (name, email_id, contact_number, dob, course, college_id, student_type, walkin_exam_id)
-                VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
+                (name, email_id, contact_number, dob, course, college_id, student_type)
+                VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN')
                 RETURNING student_id
                 `,
-                            [name.trim(), email.trim(), phone.trim(), dob, streamLabel, collegeId, walkinExamId],
+                            [name.trim(), email.trim(), phone.trim(), dob, streamLabel, collegeId],
                             (err2, result) => {
                     if (err2) {
                         console.error("Walk-in insert error:", err2);
@@ -1717,39 +1802,10 @@ router.post("/students/walkin", (req, res) => {
                         );
                     };
 
-                    if (examRows && examRows.length > 0) {
-                        return createStudentWithWalkinExam(Number(examRows[0].walkin_exam_id));
-                    }
-
-                    // If no READY walk-in exam exists for this stream, create one on demand.
-                    db.query(
-                        `
-                        INSERT INTO walkin_exams (stream, stream_code, exam_status)
-                        VALUES (?, ?, 'READY')
-                        RETURNING walkin_exam_id
-                        `,
-                        [streamLabel, streamCode],
-                        (createExamErr, createExamResult) => {
-                            if (createExamErr) {
-                                console.error("Walk-in exam auto-create error:", createExamErr);
-                                return res.status(500).json({
-                                    success: false,
-                                    message: "Could not auto-create walk-in exam for this stream"
-                                });
-                            }
-
-                            const createdWalkinExamId = Number(createExamResult?.insertId || 0);
-                            if (!createdWalkinExamId) {
-                                return res.status(500).json({
-                                    success: false,
-                                    message: "Could not resolve created walk-in exam id"
-                                });
-                            }
-
-                            return createStudentWithWalkinExam(createdWalkinExamId);
-                        }
-                    );
+                    return createStudentWithWalkinExam();
                 }
+            );
+        }
             );
         }
     );
@@ -1781,11 +1837,26 @@ router.post("/students/regular", (req, res) => {
     if (!isAtLeastAge(cleanDob, 18)) {
         return res.status(400).json({ success: false, message: "Student must be at least 18 years old." });
     }
+    if (!Number.isFinite(Number(selectedCollegeId)) || Number(selectedCollegeId) <= 0) {
+        return res.status(400).json({ success: false, message: "Invalid college selection" });
+    }
 
     db.query(
-        `SELECT student_id FROM students WHERE email_id = ?`,
-        [cleanEmail],
-        (err, rows) => {
+        `SELECT college_id FROM college WHERE college_id = ? LIMIT 1`,
+        [Number(selectedCollegeId)],
+        (collegeErr, collegeRows) => {
+            if (collegeErr) {
+                console.error("Regular college validation error:", collegeErr);
+                return res.status(500).json({ success: false, message: "Server error" });
+            }
+            if (!collegeRows || collegeRows.length === 0) {
+                return res.status(400).json({ success: false, message: "Selected college not found" });
+            }
+
+            db.query(
+                `SELECT student_id FROM students WHERE email_id = ?`,
+                [cleanEmail],
+                (err, rows) => {
             if (err) {
                 console.error("Regular student lookup error:", err);
                 return res.status(500).json({ success: false, message: "Server error" });
@@ -1830,6 +1901,8 @@ router.post("/students/regular", (req, res) => {
                         }
                     );
                 }
+            );
+        }
             );
         }
     );

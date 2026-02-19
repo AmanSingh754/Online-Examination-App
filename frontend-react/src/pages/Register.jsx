@@ -88,7 +88,7 @@ function Register() {
     <div className="landing-shell">
       <header className="landing-header">
         <div className="brand">
-          <span className="brand-mark">RP2</span>
+          <img className="brand-logo" src="/assets/rp2-official.png" alt="RP2 logo" />
           <span className="brand-text">RP2 Scholarship Exam</span>
         </div>
         <nav className="landing-nav">
@@ -102,18 +102,16 @@ function Register() {
         <section className="auth-copy">
           <p className="hero-eyebrow">Student Registration</p>
           <h1>Create your scholarship profile.</h1>
-          <p className="hero-subtitle">
-            Enter your details to register for the RP2 scholarship examination.
-            You can log in anytime to update your information.
-          </p>
         </section>
 
         <section className="auth-card">
           <h2>Create New Account</h2>
           <p className="auth-meta">Fill in the form carefully to avoid mistakes.</p>
-          <form onSubmit={handleSubmit}>
+          <form autoComplete="off" onSubmit={handleSubmit}>
             <input
               type="text"
+              name="student_register_name_input"
+              autoComplete="new-password"
               placeholder="Full Name"
               value={formState.name}
               onChange={(event) => setFormState({ ...formState, name: event.target.value })}
@@ -121,6 +119,8 @@ function Register() {
             />
             <input
               type="email"
+              name="student_register_email_input"
+              autoComplete="new-password"
               placeholder="Email"
               value={formState.email}
               onChange={(event) => setFormState({ ...formState, email: event.target.value })}
@@ -128,6 +128,8 @@ function Register() {
             />
             <input
               type="text"
+              name="student_register_phone_input"
+              autoComplete="new-password"
               placeholder="Phone Number"
               value={formState.phone}
               onChange={(event) => setFormState({ ...formState, phone: event.target.value })}
@@ -135,12 +137,16 @@ function Register() {
             />
             <input
               type="date"
+              name="student_register_dob_input"
+              autoComplete="off"
               value={formState.dob}
               onChange={(event) => setFormState({ ...formState, dob: event.target.value })}
               required
             />
             <input
               type="text"
+              name="student_register_course_input"
+              autoComplete="off"
               placeholder="Course (max 15 chars)"
               maxLength="15"
               value={formState.course}
@@ -167,6 +173,8 @@ function Register() {
             </select>
             <input
               type="password"
+              name="student_register_password_input"
+              autoComplete="new-password"
               placeholder="Create Password"
               value={formState.password}
               onChange={(event) => setFormState({ ...formState, password: event.target.value })}
@@ -184,10 +192,11 @@ function Register() {
       </main>
 
       <footer className="landing-footer">
-        Ac 2025 Scholarship Examination Portal
+        © 2026 RP2 Inc. All rights reserved.
       </footer>
     </div>
   );
 }
 
 export default Register;
+

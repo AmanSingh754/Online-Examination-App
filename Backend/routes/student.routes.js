@@ -3,6 +3,7 @@ const router = express.Router();
 const db = require("../db");
 const { getWalkinStreamCodeOrDefault, getWalkinStreamLabel } = require("../utils/walkinStream");
 const { isAtLeastAge } = require("../utils/ageValidation");
+let studentStartupSchemaSyncAttempted = false;
 
 const getWalkinDurationMinutes = (streamCode) => {
     if (streamCode === "DS") return 60;
@@ -26,7 +27,22 @@ function ensureWalkinAttemptedAtColumn() {
         }
     );
 }
-ensureWalkinAttemptedAtColumn();
+
+function runStudentStartupSchemaSync() {
+    if (studentStartupSchemaSyncAttempted) return;
+    studentStartupSchemaSyncAttempted = true;
+
+    db.query(`SELECT 1`, (probeErr) => {
+        if (probeErr) {
+            console.warn("Skipping student startup schema sync because PostgreSQL is unreachable:", String(probeErr?.message || probeErr));
+            return;
+        }
+
+        ensureWalkinAttemptedAtColumn();
+    });
+}
+
+runStudentStartupSchemaSync();
 
 /* =================================================
    AUTH
@@ -122,48 +138,65 @@ router.post("/register", (req, res) => {
     if (!isAtLeastAge(cleanDob, 18)) {
         return res.json({ success: false, message: "Student must be at least 18 years old." });
     }
+    if (!Number.isFinite(Number(cleanCollegeId)) || Number(cleanCollegeId) <= 0) {
+        return res.json({ success: false, message: "Invalid college selection" });
+    }
 
     db.query(
-        `SELECT student_id FROM students WHERE email_id = ?`,
-        [cleanEmail],
-        (err, rows) => {
-            if (err) {
-                console.error("Register lookup error:", err);
+        `SELECT college_id FROM college WHERE college_id = ? LIMIT 1`,
+        [Number(cleanCollegeId)],
+        (collegeErr, collegeRows) => {
+            if (collegeErr) {
+                console.error("Register college validation error:", collegeErr);
                 return res.json({ success: false, message: "Server error" });
             }
-
-            if (rows.length > 0) {
-                return res.json({ success: false, message: "Email already registered" });
+            if (!collegeRows || collegeRows.length === 0) {
+                return res.json({ success: false, message: "Selected college not found" });
             }
 
             db.query(
-                `
-                INSERT INTO students
-                (name, email_id, contact_number, dob, course, college_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                RETURNING student_id
-                `,
-                [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, cleanCollegeId],
-                (err2, result) => {
-                    if (err2) {
-                        console.error("Register student error:", err2);
-                        return res.json({ success: false, message: "Registration failed" });
+                `SELECT student_id FROM students WHERE email_id = ?`,
+                [cleanEmail],
+                (err, rows) => {
+                    if (err) {
+                        console.error("Register lookup error:", err);
+                        return res.json({ success: false, message: "Server error" });
                     }
 
-                    const newStudentId = result?.insertId;
+                    if (rows.length > 0) {
+                        return res.json({ success: false, message: "Email already registered" });
+                    }
+
                     db.query(
                         `
-                        INSERT INTO student_credentials
-                        (student_id, password)
-                        VALUES (?, ?)
+                        INSERT INTO students
+                        (name, email_id, contact_number, dob, course, college_id)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        RETURNING student_id
                         `,
-                        [newStudentId, cleanPassword],
-                        (err3) => {
-                            if (err3) {
-                                console.error("Register credentials error:", err3);
+                        [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, cleanCollegeId],
+                        (err2, result) => {
+                            if (err2) {
+                                console.error("Register student error:", err2);
                                 return res.json({ success: false, message: "Registration failed" });
                             }
-                            res.json({ success: true, studentId: newStudentId });
+
+                            const newStudentId = result?.insertId;
+                            db.query(
+                                `
+                                INSERT INTO student_credentials
+                                (student_id, password)
+                                VALUES (?, ?)
+                                `,
+                                [newStudentId, cleanPassword],
+                                (err3) => {
+                                    if (err3) {
+                                        console.error("Register credentials error:", err3);
+                                        return res.json({ success: false, message: "Registration failed" });
+                                    }
+                                    return res.json({ success: true, studentId: newStudentId });
+                                }
+                            );
                         }
                     );
                 }
@@ -220,6 +253,7 @@ router.get("/exams/:studentId", (req, res) => {
             if (String(student.status || "").toUpperCase() !== "ACTIVE") {
                 return res.json([]);
             }
+
             const normalizedType = String(student.student_type || "")
                 .trim()
                 .toUpperCase()
@@ -231,89 +265,98 @@ router.get("/exams/:studentId", (req, res) => {
                 normalizedType === "WALK_IN_STUDENT";
 
             if (isWalkin) {
-                const walkinExamId = Number(student.walkin_exam_id || 0);
-                if (!walkinExamId) {
-                    return res.json([]);
-                }
+                const streamCode = getWalkinStreamCodeOrDefault(student.course);
+                const streamLabel = getWalkinStreamLabel(streamCode);
+                const durationMinutes = getWalkinDurationMinutes(streamCode);
+
                 return db.query(
-                    `SELECT stream FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
-                    [walkinExamId],
-                    (err4, walkinExamRows) => {
-                        if (err4) {
-                            console.error("Walk-in stream lookup error:", err4);
+                    `
+                    SELECT walkin_exam_id
+                    FROM walkin_exams
+                    WHERE stream_code = ?
+                      AND (exam_status = 'READY' OR exam_status IS NULL)
+                    ORDER BY walkin_exam_id DESC
+                    LIMIT 1
+                    `,
+                    [streamCode],
+                    (examErr, examRows) => {
+                        if (examErr) {
+                            console.error("Walk-in exam lookup error:", examErr);
                             return res.json([]);
                         }
 
-                        const streamCode = getWalkinStreamCodeOrDefault(
-                            walkinExamRows?.[0]?.stream || student.course
-                        );
-                        const durationMinutes = getWalkinDurationMinutes(streamCode);
-                        const streamLabel = getWalkinStreamLabel(streamCode);
-
-                        return res.json([
-                            {
-                                exam_id: walkinExamId,
-                                exam_name: `${streamLabel} Walk-in Exam`,
-                                exam_start_date: new Date().toISOString().slice(0, 10),
-                                exam_end_date: new Date().toISOString().slice(0, 10),
-                                start_time: null,
-                                end_time: null,
-                                duration_minutes: durationMinutes,
-                                course: streamLabel
+                        const respondWithWalkinExam = (resolvedExamId) => {
+                            if (!resolvedExamId) {
+                                return res.json([]);
                             }
-                        ]);
+                            return res.json([
+                                {
+                                    exam_id: Number(resolvedExamId),
+                                    exam_name: `${streamLabel} Walk-in Exam`,
+                                    exam_start_date: new Date().toISOString().slice(0, 10),
+                                    exam_end_date: new Date().toISOString().slice(0, 10),
+                                    start_time: null,
+                                    end_time: null,
+                                    duration_minutes: durationMinutes,
+                                    course: streamLabel
+                                }
+                            ]);
+                        };
+
+                        const resolvedExamId = Number(examRows?.[0]?.walkin_exam_id || 0);
+                        if (resolvedExamId > 0) {
+                            return respondWithWalkinExam(resolvedExamId);
+                        }
+
+                        return db.query(
+                            `
+                            INSERT INTO walkin_exams (stream, stream_code, exam_status)
+                            VALUES (?, ?, 'READY')
+                            RETURNING walkin_exam_id
+                            `,
+                            [streamLabel, streamCode],
+                            (createErr, createRows) => {
+                                if (createErr) {
+                                    console.error("Walk-in exam auto-create error:", createErr);
+                                    return res.json([]);
+                                }
+                                return respondWithWalkinExam(Number(createRows?.insertId || 0));
+                            }
+                        );
                     }
                 );
             }
 
-            db.query(
-                `
-                SELECT live_start_date, live_end_date
-                FROM exam_window_config
-                ORDER BY id DESC
-                LIMIT 1
-                `,
-                [],
-                (err2, windowRows) => {
-                    if (err2 || !windowRows || windowRows.length === 0) {
-                        if (err2) console.error("Exam window lookup error:", err2);
-                        return res.json([]);
-                    }
+            const sql = `
+                SELECT 
+                    e.exam_id,
+                    CONCAT(e.course, ' Exam') AS exam_name,
+                    DATE(e.start_at) AS exam_start_date,
+                    DATE(e.end_at) AS exam_end_date,
+                    TIME(e.start_at) AS start_time,
+                    TIME(e.end_at) AS end_time,
+                    e.course
+                FROM students s
+                JOIN exams e ON e.course = s.course
+                WHERE s.student_id = ?
+                  AND e.exam_status = 'READY'
+                  AND NOW() BETWEEN e.start_at AND e.end_at
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM results r
+                      WHERE r.student_id = s.student_id
+                        AND r.exam_id = e.exam_id
+                  )
+                ORDER BY e.exam_id DESC
+            `;
 
-                    const examWindow = windowRows[0];
-                    // Regular exam: depends on per-exam schedule window.
-                    const sql = `
-                        SELECT 
-                            e.exam_id,
-                            CONCAT(e.course, ' Exam') AS exam_name,
-                            DATE(e.start_at) AS exam_start_date,
-                            DATE(e.end_at) AS exam_end_date,
-                            TIME(e.start_at) AS start_time,
-                            TIME(e.end_at) AS end_time,
-                            e.course
-                        FROM students s
-                        JOIN exams e ON e.course = s.course
-                        WHERE s.student_id = ?
-                          AND e.exam_status = 'READY'
-                          AND NOW() BETWEEN e.start_at AND e.end_at
-                          AND NOT EXISTS (
-                              SELECT 1
-                              FROM results r
-                              WHERE r.student_id = s.student_id
-                                AND r.exam_id = e.exam_id
-                          )
-                        ORDER BY e.exam_id DESC
-                    `;
-
-                    db.query(sql, [studentId], (err6, rows) => {
-                        if (err6) {
-                            console.error("Available exams error:", err6);
-                            return res.json([]);
-                        }
-                        return res.json(rows || []);
-                    });
+            return db.query(sql, [studentId], (err6, rows) => {
+                if (err6) {
+                    console.error("Available exams error:", err6);
+                    return res.json([]);
                 }
-            );
+                return res.json(rows || []);
+            });
         }
     );
 });

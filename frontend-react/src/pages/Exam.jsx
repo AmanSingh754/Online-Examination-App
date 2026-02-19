@@ -14,7 +14,8 @@ const LANGUAGE_OPTIONS = [
 const INSTRUCTIONS = [
   "When you click Next, your current answer will be saved and you can move forward.",
   "To revisit an earlier question, please use the Previous button.",
-  "Please avoid refreshing or closing the browser while the exam is in progress."
+  "Please avoid refreshing or closing the browser while the exam is in progress.",
+  "Fullscreen is mandatory. If fullscreen is disabled 3 times, your exam will be auto-submitted."
 ];
 
 const SECTION_INSTRUCTIONS = {
@@ -139,12 +140,49 @@ export default function Exam() {
   const [savedQuestions, setSavedQuestions] = useState({});
   const [submitMessage, setSubmitMessage] = useState("");
   const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [violationWarning, setViolationWarning] = useState({
+    open: false,
+    count: 0,
+    reason: ""
+  });
+  const [securityNotice, setSecurityNotice] = useState("");
+  const [securityNoticeKey, setSecurityNoticeKey] = useState(0);
   const [descriptiveLimitMessage, setDescriptiveLimitMessage] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(null);
   const [remainingSeconds, setRemainingSeconds] = useState(null);
   const violationCooldownRef = useRef(0);
   const autoSubmitTriggeredRef = useRef(false);
   const focusLossActiveRef = useRef(false);
+  const fullscreenViolationActiveRef = useRef(false);
+  const securityNoticeTimeoutRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (securityNoticeTimeoutRef.current) {
+        clearTimeout(securityNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const shouldLockScroll =
+      preExamOpen ||
+      sectionOverlayOpen ||
+      submitConfirmOpen ||
+      Boolean(submitMessage) ||
+      violationWarning.open;
+    if (!shouldLockScroll) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    const previousTouchAction = document.body.style.touchAction;
+    document.body.style.overflow = "hidden";
+    document.body.style.touchAction = "none";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.body.style.touchAction = previousTouchAction;
+    };
+  }, [preExamOpen, sectionOverlayOpen, submitConfirmOpen, submitMessage, violationWarning.open]);
 
   const getAnswerKey = (question, languageOverride = null) => {
     if (!question) return "";
@@ -482,12 +520,6 @@ export default function Exam() {
 
   useEffect(() => {
     if (preExamOpen || submitSuccess || isSubmitting) return;
-    if (!isFullscreen) {
-      const timer = setTimeout(() => {
-        enterFullscreen();
-      }, 120);
-      return () => clearTimeout(timer);
-    }
     return undefined;
   }, [isFullscreen, preExamOpen, submitSuccess, isSubmitting]);
 
@@ -851,7 +883,7 @@ export default function Exam() {
           setSubmitSuccess(true);
           setSubmitMessage(
             forceSubmit
-              ? "Exam auto-submitted after 3 tab-switch violations."
+              ? "Exam auto-submitted after 3 fullscreen/focus violations."
               : "Exam submitted successfully. Please wait for results. Thank you."
           );
           setTimeout(() => {
@@ -877,29 +909,29 @@ export default function Exam() {
     (reason) => {
       if (preExamOpen || isSubmitting || submitSuccess) return;
       const now = Date.now();
-      if (now - violationCooldownRef.current < 900) return;
+      if (now - violationCooldownRef.current < 700) return;
       violationCooldownRef.current = now;
 
       setViolations((prev) => {
         const next = Math.min(prev + 1, VIOLATION_LIMIT);
         const reasonText = String(reason || "Focus violation detected").trim();
-
-        if (next >= VIOLATION_LIMIT) {
-          setSubmitConfirmOpen(false);
-          if (!autoSubmitTriggeredRef.current) {
-            autoSubmitTriggeredRef.current = true;
-            setTimeout(() => {
-              void handleConfirmSubmit({
-                force: true,
-                reason: reasonText
-              });
-            }, 120);
-          }
+        setViolationWarning({
+          open: true,
+          count: next,
+          reason: reasonText
+        });
+        setSecurityNotice(
+          `${reasonText}. Violation ${next}/${VIOLATION_LIMIT}.`
+        );
+        setSecurityNoticeKey((prevKey) => prevKey + 1);
+        if (securityNoticeTimeoutRef.current) {
+          clearTimeout(securityNoticeTimeoutRef.current);
         }
+        securityNoticeTimeoutRef.current = setTimeout(() => {
+          setSecurityNotice("");
+        }, 4400);
         return next;
       });
-
-      enterFullscreen();
       if (typeof window.focus === "function") {
         try {
           window.focus();
@@ -908,8 +940,47 @@ export default function Exam() {
         }
       }
     },
-    [handleConfirmSubmit, isSubmitting, preExamOpen, submitSuccess]
+    [isSubmitting, preExamOpen, submitSuccess]
   );
+
+  const handleViolationGoFullscreen = useCallback(() => {
+    enterFullscreen();
+    setViolationWarning((prev) => ({ ...prev, open: false }));
+    if (typeof window.focus === "function") {
+      try {
+        window.focus();
+      } catch (_) {
+        /* ignore focus errors */
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (preExamOpen || submitSuccess || isSubmitting) return;
+    const onFullscreenChange = () => {
+      const fullscreenActive =
+        Boolean(document.fullscreenElement) ||
+        Boolean(document.webkitFullscreenElement) ||
+        Boolean(document.mozFullScreenElement) ||
+        Boolean(document.msFullscreenElement);
+      if (!fullscreenActive) {
+        registerViolation("Fullscreen disabled");
+        fullscreenViolationActiveRef.current = true;
+      } else {
+        fullscreenViolationActiveRef.current = false;
+      }
+    };
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
+    document.addEventListener("mozfullscreenchange", onFullscreenChange);
+    document.addEventListener("MSFullscreenChange", onFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", onFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", onFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", onFullscreenChange);
+    };
+  }, [isSubmitting, preExamOpen, registerViolation, submitSuccess]);
 
   useEffect(() => {
     if (preExamOpen) return;
@@ -930,7 +1001,6 @@ export default function Exam() {
         markFocusLoss("Tab switch detected");
       } else {
         clearFocusLoss();
-        enterFullscreen();
       }
     };
 
@@ -942,7 +1012,6 @@ export default function Exam() {
 
     const handleWindowFocus = () => {
       clearFocusLoss();
-      enterFullscreen();
     };
 
     const handlePageHide = () => {
@@ -953,13 +1022,17 @@ export default function Exam() {
       const key = String(event.key || "").toLowerCase();
       const ctrlOrMeta = Boolean(event.ctrlKey || event.metaKey);
       const altTab = Boolean(event.altKey && key === "tab");
+      const escPressed = key === "escape";
       const blocked =
+        escPressed ||
         key === "f5" ||
         altTab ||
         (ctrlOrMeta && (key === "tab" || key === "w" || key === "r" || key === "l")) ||
         (ctrlOrMeta && event.shiftKey && key === "tab");
       if (blocked) {
         event.preventDefault();
+        // For Esc, count a violation only when fullscreen actually exits
+        // (handled in fullscreenchange listener) to avoid double-counting.
         if (altTab) {
           markFocusLoss("Alt+Tab attempt detected");
         }
@@ -1394,6 +1467,33 @@ export default function Exam() {
           </div>
         </div>
       )}
+      {violationWarning.open && !submitSuccess && (
+        <div
+          className="violation-warning-overlay"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="violation-warning-title"
+          aria-describedby="violation-warning-body"
+        >
+          <div className="violation-warning-panel">
+            <h3 id="violation-warning-title">Warning</h3>
+            <p id="violation-warning-body">
+              You are trying to go outside the exam window.
+            </p>
+            <p className="violation-warning-count">
+              Violations occurred: {violationWarning.count}/{VIOLATION_LIMIT}
+            </p>
+            {violationWarning.reason ? (
+              <p className="violation-warning-reason">{violationWarning.reason}</p>
+            ) : null}
+            <div className="violation-warning-actions">
+              <button type="button" className="nav-btn primary" onClick={handleViolationGoFullscreen}>
+                Go Fullscreen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="exam-header">
         <div>
           <p className="eyebrow">Live proctored session</p>
@@ -1436,6 +1536,16 @@ export default function Exam() {
           </button>
         </div>
       </div>
+      {securityNotice && (
+        <div
+          key={`security-notice-${securityNoticeKey}`}
+          className="security-notice"
+          role="alert"
+          aria-live="assertive"
+        >
+          {securityNotice}
+        </div>
+      )}
       {currentSection && (
         <div className="section-banner-outside">
           {sectionNavigator.sections.length > 0 && (

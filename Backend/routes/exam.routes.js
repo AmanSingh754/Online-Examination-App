@@ -434,6 +434,7 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
             wsa.question_id,
             COALESCE(wsa.section_name, '') AS section_name,
             UPPER(COALESCE(wsa.question_type::text, '')) AS question_type,
+            COALESCE(wsa.descriptive_answer, '') AS descriptive_answer,
             COALESCE(wsa.marks_obtained, 0) AS marks_obtained,
             COALESCE(wsa.testcases_passed, 0) AS testcases_passed,
             wa.question_id AS aptitude_qid,
@@ -441,6 +442,7 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
             wc.question_id AS coding_qid,
             COALESCE(wa.marks, ws.marks, wc.marks, 0) AS full_marks,
             COALESCE(wa.question_text, ws.question_text, wc.question_text, '') AS question_text,
+            COALESCE(ws.descriptive_answer, '') AS reference_descriptive_answer,
             LOWER(COALESCE(wc.difficulty, '')) AS coding_difficulty,
             wc.testcases AS coding_testcases
         FROM walkin_student_answers wsa
@@ -506,7 +508,9 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
             coding_difficulty: String(row.coding_difficulty || ""),
             testcases_passed: Number(row.testcases_passed || 0),
             total_testcases: isCoding ? parseTestcaseCount(row.coding_testcases) : 0,
-            question_text: String(row.question_text || "")
+            question_text: String(row.question_text || ""),
+            descriptive_answer: String(row.descriptive_answer || ""),
+            reference_answer: String(row.reference_descriptive_answer || "")
         });
     }
 
@@ -623,11 +627,25 @@ router.post("/start", async (req, res) => {
             [examId]
         );
         if (walkinRows && walkinRows.length > 0) {
-            const assignedWalkinExamId = await fetchAssignedWalkinExamId(studentId);
-            if (!assignedWalkinExamId || assignedWalkinExamId !== examId) {
+            const studentRows = await queryAsync(
+                `SELECT status, course FROM students WHERE student_id = ? LIMIT 1`,
+                [studentId]
+            );
+            const student = studentRows?.[0] || {};
+            const isActive = String(student.status || "").trim().toUpperCase() === "ACTIVE";
+            if (!isActive) {
                 return res.status(403).json({ success: false, message: "Forbidden" });
             }
-            req.session.student.walkinExamId = assignedWalkinExamId;
+            const examRows = await queryAsync(
+                `SELECT stream FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
+                [examId]
+            );
+            const examStreamCode = normalizeWalkinStream(examRows?.[0]?.stream || "");
+            const studentStreamCode = normalizeWalkinStream(student.course || "");
+            if (!examStreamCode || !studentStreamCode || examStreamCode !== studentStreamCode) {
+                return res.status(403).json({ success: false, message: "Forbidden" });
+            }
+            req.session.student.walkinExamId = examId;
             return res.json({ success: true, studentExamId: null });
         }
 
@@ -785,19 +803,32 @@ router.get("/questions/:examId", (req, res) => {
                         return proceed();
                     }
                     db.query(
-                        `SELECT walkin_exam_id FROM students WHERE student_id = ? LIMIT 1`,
+                        `SELECT walkin_exam_id, status, course FROM students WHERE student_id = ? LIMIT 1`,
                         [req.session?.student?.studentId],
                         (mapErr, mapRows) => {
                             if (mapErr) {
                                 console.error("Walk-in assignment lookup error:", mapErr);
                                 return res.status(500).json({ success: false, message: "Could not verify walk-in assignment" });
                             }
-                            const assignedWalkinExamId = Number(mapRows?.[0]?.walkin_exam_id || 0);
-                            if (!assignedWalkinExamId || assignedWalkinExamId !== examIdNum) {
+                            const student = mapRows?.[0] || {};
+                            const isActive = String(student.status || "").trim().toUpperCase() === "ACTIVE";
+                            if (!isActive) {
+                                return res.status(403).json({ success: false, message: "Forbidden" });
+                            }
+                            const assignedWalkinExamId = Number(student.walkin_exam_id || 0);
+                            const examStreamCode = normalizeWalkinStream(walkinExam.stream || "");
+                            const studentStreamCode = normalizeWalkinStream(student.course || "");
+                            const streamMatch = Boolean(
+                                examStreamCode &&
+                                studentStreamCode &&
+                                examStreamCode === studentStreamCode
+                            );
+                            if (!streamMatch && (!assignedWalkinExamId || assignedWalkinExamId !== examIdNum)) {
                                 return res.status(403).json({ success: false, message: "Forbidden" });
                             }
                             if (req.session?.student) {
-                                req.session.student.walkinExamId = assignedWalkinExamId;
+                                req.session.student.walkinExamId =
+                                    streamMatch ? examIdNum : assignedWalkinExamId;
                             }
                             return proceed();
                         }
@@ -1078,11 +1109,21 @@ router.post("/submit", async (req, res) => {
             return res.status(403).json({ success: false, message: "Forbidden" });
         }
         if (isWalkin && isWalkinExamId) {
-            const assignedWalkinExamId = await fetchAssignedWalkinExamId(studentId);
-            if (!assignedWalkinExamId || assignedWalkinExamId !== examIdNum) {
+            const studentRows = await queryAsync(
+                `SELECT status, course FROM students WHERE student_id = ? LIMIT 1`,
+                [studentId]
+            );
+            const student = studentRows?.[0] || {};
+            const isActive = String(student.status || "").trim().toUpperCase() === "ACTIVE";
+            if (!isActive) {
                 return res.status(403).json({ success: false, message: "Forbidden" });
             }
-            req.session.student.walkinExamId = assignedWalkinExamId;
+            const examStreamCode = normalizeWalkinStream(walkinExamRows?.[0]?.stream || "");
+            const studentStreamCode = normalizeWalkinStream(student.course || "");
+            if (!examStreamCode || !studentStreamCode || examStreamCode !== studentStreamCode) {
+                return res.status(403).json({ success: false, message: "Forbidden" });
+            }
+            req.session.student.walkinExamId = examIdNum;
         }
 
         let effectiveStudentExamId = null;
@@ -1272,40 +1313,28 @@ router.post("/submit", async (req, res) => {
             await ensureWalkinSummaryColumn();
             await ensureWalkinAttemptedAtColumn();
             await ensureWalkinAnswerSectionColumn();
-
-            const priorFinalRows = await queryAsync(
-                `SELECT result_id
-                 FROM walkin_final_results
-                 WHERE student_id = ?
-                   AND exam_id = ?
-                 LIMIT 1`,
-                [studentId, examIdNum]
+            const streamCode = normalizeWalkinStream(
+                walkinExamRows?.[0]?.stream || req.session?.student?.course || "MERN"
             );
-            const isWalkinReattempt = Array.isArray(priorFinalRows) && priorFinalRows.length > 0;
-            if (isWalkinReattempt) {
-                const streamCode = normalizeWalkinStream(
-                    walkinExamRows?.[0]?.stream || req.session?.student?.course || "MERN"
-                );
-                const baseStreamLabel = getWalkinStreamDbLabel(streamCode);
-                const insertWalkinExamResult = await queryAsync(
-                    `INSERT INTO walkin_exams (stream, stream_code, exam_status)
-                     VALUES (?, ?, 'READY')
-                     RETURNING walkin_exam_id`,
-                    [baseStreamLabel, streamCode]
-                );
-                const newWalkinExamId = Number(insertWalkinExamResult?.insertId || 0);
-                if (!newWalkinExamId) {
-                    throw new Error("Could not create reattempt walk-in exam");
-                }
-                effectiveExamIdNum = newWalkinExamId;
-                await queryAsync(
-                    `UPDATE students
-                     SET walkin_exam_id = ?
-                     WHERE student_id = ?`,
-                    [effectiveExamIdNum, studentId]
-                );
-                req.session.student.walkinExamId = effectiveExamIdNum;
+            const baseStreamLabel = getWalkinStreamDbLabel(streamCode);
+            const insertWalkinExamResult = await queryAsync(
+                `INSERT INTO walkin_exams (stream, stream_code, exam_status)
+                 VALUES (?, ?, 'READY')
+                 RETURNING walkin_exam_id`,
+                [baseStreamLabel, streamCode]
+            );
+            const newWalkinExamId = Number(insertWalkinExamResult?.insertId || 0);
+            if (!newWalkinExamId) {
+                throw new Error("Could not create walk-in submission exam id");
             }
+            effectiveExamIdNum = newWalkinExamId;
+            await queryAsync(
+                `UPDATE students
+                 SET walkin_exam_id = ?
+                 WHERE student_id = ?`,
+                [effectiveExamIdNum, studentId]
+            );
+            req.session.student.walkinExamId = effectiveExamIdNum;
         }
 
         for (const a of answers) {

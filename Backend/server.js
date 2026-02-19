@@ -1,4 +1,4 @@
-const path = require("path");
+﻿const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 process.env.TZ = process.env.APP_TIMEZONE || "Asia/Kolkata";
 const express = require("express");
@@ -82,9 +82,35 @@ const requireStudentPage = (req, res, next) => {
     return res.redirect("/student/login");
 };
 
-/* ✅ ROOT ROUTE (ADD THIS) */
+/* âœ… ROOT ROUTE (ADD THIS) */
 app.get("/", (req, res) => {
     sendIndex(res);
+});
+
+app.get(["/admin", "/admin/"], (req, res) => {
+    if (hasReactBuild) {
+        return res.redirect("/admin/login");
+    }
+
+    const legacyAdminLogin = path.join(legacyFrontend, "admin-login.html");
+    if (fs.existsSync(legacyAdminLogin)) {
+        return res.sendFile(legacyAdminLogin);
+    }
+
+    return sendIndex(res);
+});
+
+app.get(["/admin/login", "/admin/login/"], (req, res) => {
+    if (hasReactBuild) {
+        return sendIndex(res);
+    }
+
+    const legacyAdminLogin = path.join(legacyFrontend, "admin-login.html");
+    if (fs.existsSync(legacyAdminLogin)) {
+        return res.sendFile(legacyAdminLogin);
+    }
+
+    return sendIndex(res);
 });
 
 if (hasReactBuild) {
@@ -128,6 +154,7 @@ if (hasReactBuild) {
     });
 }
 
-app.listen(5000, () => {
-    console.log("✅ Server running at http://localhost:5000");
+const port = Number(process.env.PORT || 5000);
+app.listen(port, () => {
+    console.log(`Server running at http://localhost:${port}`);
 });

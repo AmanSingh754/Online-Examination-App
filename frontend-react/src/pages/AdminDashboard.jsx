@@ -36,6 +36,179 @@ const formatIST24 = (value) => {
   }).format(parsed);
 };
 
+const parseFraction = (value) => {
+  const match = String(value || "").match(/([0-9]+(?:\.[0-9]+)?)\s*\/\s*([0-9]+(?:\.[0-9]+)?)/);
+  if (!match) return null;
+  const scored = Number(match[1]);
+  const total = Number(match[2]);
+  if (!Number.isFinite(scored) || !Number.isFinite(total) || total <= 0) return null;
+  return { scored, total };
+};
+
+const parsePercent = (value) => {
+  const match = String(value || "").match(/\((\d+(?:\.\d+)?)\s*%\)/);
+  if (!match) return null;
+  const percent = Number(match[1]);
+  return Number.isFinite(percent) ? percent : null;
+};
+
+const parseSectionSummary = (lines, label) => {
+  const line = lines.find((entry) => new RegExp(`^\\d+\\.\\s*${label}\\s*:`, "i").test(entry));
+  if (!line) return null;
+  const detail = line.replace(/^\d+\.\s*[^:]+:\s*/i, "").trim();
+  const marks = parseFraction(detail);
+  if (!marks) return null;
+  const percent = parsePercent(detail) ?? (marks.scored / marks.total) * 100;
+  return {
+    label,
+    scored: marks.scored,
+    total: marks.total,
+    percent: Math.max(0, Math.min(100, percent)),
+    detail
+  };
+};
+
+const parseCodingSummary = (lines) => {
+  const line = lines.find((entry) => /^\d+\.\s*Coding\s*:/i.test(entry));
+  if (!line) return null;
+  const detail = line.replace(/^\d+\.\s*Coding\s*:\s*/i, "").trim();
+  const levels = [];
+  const levelRegex = /(Easy|Medium|Hard)\s+([0-9]+(?:\.[0-9]+)?)\s*\/\s*([0-9]+(?:\.[0-9]+)?)\s*\[TC\s*([0-9]+)\s*\/\s*([0-9]+)\]/gi;
+  let levelMatch = levelRegex.exec(detail);
+  while (levelMatch) {
+    const scored = Number(levelMatch[2]);
+    const total = Number(levelMatch[3]);
+    const passed = Number(levelMatch[4]);
+    const tcTotal = Number(levelMatch[5]);
+    levels.push({
+      name: levelMatch[1],
+      scored,
+      total,
+      passed,
+      tcTotal,
+      percent: total > 0 ? Math.max(0, Math.min(100, (scored / total) * 100)) : 0,
+      tcPercent: tcTotal > 0 ? Math.max(0, Math.min(100, (passed / tcTotal) * 100)) : 0
+    });
+    levelMatch = levelRegex.exec(detail);
+  }
+  if (levels.length === 0) return null;
+  const scoredTotal = levels.reduce((sum, level) => sum + level.scored, 0);
+  const maxTotal = levels.reduce((sum, level) => sum + level.total, 0);
+  const percent = maxTotal > 0 ? Math.max(0, Math.min(100, (scoredTotal / maxTotal) * 100)) : 0;
+  return {
+    label: "Coding",
+    scored: scoredTotal,
+    total: maxTotal,
+    percent,
+    detail,
+    levels
+  };
+};
+
+const parseCodingLevelName = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "Coding";
+  if (normalized.includes("easy")) return "Easy";
+  if (normalized.includes("intermediate") || normalized.includes("medium")) return "Medium";
+  if (normalized.includes("advanced") || normalized.includes("hard")) return "Hard";
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+};
+
+const parseCodingSummaryFromTopicStats = (lines) => {
+  const codingLines = lines.filter((entry) => /^coding[-\s_]/i.test(entry));
+  if (codingLines.length === 0) return null;
+  const levels = [];
+  codingLines.forEach((entry) => {
+    const match = entry.match(
+      /^coding[-\s_]*([a-z]+)\s+([0-9]+(?:\.[0-9]+)?)\s*\/\s*([0-9]+(?:\.[0-9]+)?)/i
+    );
+    if (!match) return;
+    const scored = Number(match[2]);
+    const total = Number(match[3]);
+    if (!Number.isFinite(scored) || !Number.isFinite(total)) return;
+    levels.push({
+      name: parseCodingLevelName(match[1]),
+      scored,
+      total,
+      passed: 0,
+      tcTotal: 0,
+      percent: total > 0 ? Math.max(0, Math.min(100, (scored / total) * 100)) : 0,
+      tcPercent: 0
+    });
+  });
+  if (levels.length === 0) return null;
+  const scoredTotal = levels.reduce((sum, level) => sum + level.scored, 0);
+  const maxTotal = levels.reduce((sum, level) => sum + level.total, 0);
+  return {
+    label: "Coding",
+    scored: scoredTotal,
+    total: maxTotal,
+    percent: maxTotal > 0 ? Math.max(0, Math.min(100, (scoredTotal / maxTotal) * 100)) : 0,
+    detail: codingLines.join(" | "),
+    levels
+  };
+};
+
+const buildCodingSummaryFromAnswers = (answers) => {
+  const codingAnswers = (Array.isArray(answers) ? answers : []).filter(
+    (answer) => String(answer?.question_type || "").toLowerCase() === "coding"
+  );
+  if (codingAnswers.length === 0) return null;
+  const bucket = new Map();
+  codingAnswers.forEach((answer) => {
+    const rawLevel = String(answer?.section_label || answer?.section_name || "Coding");
+    const levelName = parseCodingLevelName(rawLevel);
+    if (!bucket.has(levelName)) {
+      bucket.set(levelName, {
+        name: levelName,
+        scored: 0,
+        total: 0,
+        passed: 0,
+        tcTotal: 0
+      });
+    }
+    const level = bucket.get(levelName);
+    level.scored += Number(answer?.marks_obtained || 0);
+    level.total += Number(answer?.full_marks || 0);
+    level.passed += Number(answer?.testcases_passed || 0);
+    level.tcTotal += Number(answer?.total_testcases || 0);
+  });
+  const levelSortOrder = { Easy: 1, Medium: 2, Hard: 3 };
+  const levels = Array.from(bucket.values())
+    .map((level) => ({
+      ...level,
+      percent: level.total > 0 ? Math.max(0, Math.min(100, (level.scored / level.total) * 100)) : 0,
+      tcPercent: level.tcTotal > 0 ? Math.max(0, Math.min(100, (level.passed / level.tcTotal) * 100)) : 0
+    }))
+    .sort((left, right) => (levelSortOrder[left.name] || 99) - (levelSortOrder[right.name] || 99));
+  const scoredTotal = levels.reduce((sum, level) => sum + level.scored, 0);
+  const maxTotal = levels.reduce((sum, level) => sum + level.total, 0);
+  return {
+    label: "Coding",
+    scored: scoredTotal,
+    total: maxTotal,
+    percent: maxTotal > 0 ? Math.max(0, Math.min(100, (scoredTotal / maxTotal) * 100)) : 0,
+    detail: "Derived from coding answers",
+    levels
+  };
+};
+
+const WALKIN_COURSE_KEYS = new Set(["DS", "DATASCIENCE", "DA", "DATAANALYTICS", "MERN", "FULLSTACK"]);
+const isWalkinStudentRow = (student) => {
+  const typeNormalized = String(student?.student_type || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+  if (typeNormalized === "WALKIN" || typeNormalized === "WALK_IN") {
+    return true;
+  }
+  const courseKey = String(student?.course || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  return WALKIN_COURSE_KEYS.has(courseKey);
+};
+
 function AdminDashboard() {
   useBodyClass("dashboard admin-dashboard");
 
@@ -78,7 +251,8 @@ function AdminDashboard() {
     email: "",
     phone: "",
     dob: "",
-    stream: ""
+    stream: "",
+    collegeId: ""
   });
   const [walkinStatus, setWalkinStatus] = useState("");
   const [walkinCredentials, setWalkinCredentials] = useState(null);
@@ -94,6 +268,7 @@ function AdminDashboard() {
   const [walkinReviewData, setWalkinReviewData] = useState(null);
   const [walkinReviewLoading, setWalkinReviewLoading] = useState(false);
   const [walkinReviewError, setWalkinReviewError] = useState("");
+  const [walkinReviewView, setWalkinReviewView] = useState("summary");
   const [walkinResultsSearch, setWalkinResultsSearch] = useState("");
   const [walkinResultsStreamFilter, setWalkinResultsStreamFilter] = useState("ALL");
   const [walkinResultsExamFilter, setWalkinResultsExamFilter] = useState("ALL");
@@ -134,15 +309,28 @@ function AdminDashboard() {
   const renderWalkinOptions = (item) => {
     const hasOptions = WALKIN_OPTION_KEYS.some(({ key }) => item[key]);
     if (!hasOptions) return null;
+    const selectedOption = String(item?.selected_option || "").trim().toUpperCase();
+    const correctOption = String(item?.correct_option || "").trim().toUpperCase();
     return (
       <div className="walkin-options">
-        {WALKIN_OPTION_KEYS.map(({ key, label }) =>
-          item[key] ? (
-            <p className="item-option" key={key}>
+        {WALKIN_OPTION_KEYS.map(({ key, label }) => {
+          const normalizedLabel = String(label || "").trim().toUpperCase();
+          const isSelected = Boolean(selectedOption) && selectedOption === normalizedLabel;
+          const isCorrect = Boolean(correctOption) && correctOption === normalizedLabel;
+          const optionStateClass = isSelected
+            ? (isCorrect ? "option-selected-correct" : "option-selected-wrong")
+            : (isCorrect ? "option-correct-answer" : "");
+          const resultBadge = isSelected
+            ? (isCorrect ? "Your Answer ✓" : "Your Answer ✗")
+            : (isCorrect ? "Correct ✓" : "");
+          return item[key] ? (
+            <p className={`item-option ${optionStateClass}`.trim()} key={key}>
               <span className="option-label">{label}.</span>
               <span className="option-text">{item[key]}</span>
+              {resultBadge ? <span className="option-result-badge">{resultBadge}</span> : null}
             </p>
-          ) : null
+          ) : null;
+        }
         )}
       </div>
     );
@@ -197,9 +385,7 @@ function AdminDashboard() {
       return;
     }
     loadDashboardStats();
-    if (collegeId) {
-      loadStudents();
-    }
+    loadStudents();
   }, [adminId, collegeId, navigate]);
 
   useEffect(() => {
@@ -220,6 +406,10 @@ function AdminDashboard() {
         setSelectedCollegeId(activeCollegeId);
         localStorage.setItem("collegeId", activeCollegeId);
         setRegularForm((prev) => ({
+          ...prev,
+          collegeId: prev.collegeId || activeCollegeId
+        }));
+        setWalkinForm((prev) => ({
           ...prev,
           collegeId: prev.collegeId || activeCollegeId
         }));
@@ -291,7 +481,7 @@ function AdminDashboard() {
 
   const loadRecentResults = async () => {
     try {
-      const response = await fetch(`/admin/results/${collegeId}`);
+      const response = await fetch(`/admin/results/ALL`);
       const data = await response.json();
       setRecentResults(Array.isArray(data) ? data : []);
     } catch (err) {
@@ -323,11 +513,41 @@ function AdminDashboard() {
   };
 
   const loadStudents = async () => {
-    try {
-      const response = await fetch(`/admin/students/${collegeId}`);
+    const fetchStudentsByScope = async (scope) => {
+      const response = await fetch(`/admin/students/${scope}`, {
+        credentials: "include",
+        cache: "no-store"
+      });
+      if (!response.ok) {
+        throw new Error(`Student load failed (${response.status})`);
+      }
       const data = await response.json();
-      setStudents(Array.isArray(data) ? data : []);
+      return Array.isArray(data) ? data : [];
+    };
+
+    const fallbackCollegeId = String(
+      collegeId || localStorage.getItem("collegeId") || ""
+    ).trim();
+
+    try {
+      const allRows = await fetchStudentsByScope("ALL");
+      if (allRows.length > 0 || !fallbackCollegeId) {
+        setStudents(allRows);
+        return;
+      }
+
+      const scopedRows = await fetchStudentsByScope(fallbackCollegeId);
+      setStudents(scopedRows);
     } catch (err) {
+      try {
+        if (fallbackCollegeId) {
+          const scopedRows = await fetchStudentsByScope(fallbackCollegeId);
+          setStudents(scopedRows);
+          return;
+        }
+      } catch (fallbackErr) {
+        console.error("Load students fallback error:", fallbackErr);
+      }
       console.error("Load students error:", err);
       setStudents([]);
     }
@@ -374,7 +594,7 @@ function AdminDashboard() {
           fetch(`/admin/students/count/${collegeId}`),
           fetch(`/admin/exams/count/${collegeId}`),
           fetch(`/admin/exams/active-count/${collegeId}`),
-          fetch(`/admin/results/${collegeId}`)
+          fetch(`/admin/results/ALL`)
         ]);
 
         const studentsData = await studentsResp.json();
@@ -401,12 +621,8 @@ function AdminDashboard() {
     setWalkinStatus("");
     setWalkinCredentials(null);
 
-    if (!walkinForm.name || !walkinForm.email || !walkinForm.phone || !walkinForm.dob || !walkinForm.stream) {
+    if (!walkinForm.name || !walkinForm.email || !walkinForm.phone || !walkinForm.dob || !walkinForm.stream || !walkinForm.collegeId) {
       setWalkinStatus("Fill all walk-in student details.");
-      return;
-    }
-    if (!collegeId) {
-      setWalkinStatus("Select a college before creating a walk-in student.");
       return;
     }
 
@@ -420,7 +636,7 @@ function AdminDashboard() {
           phone: walkinForm.phone,
           dob: walkinForm.dob,
           course: walkinForm.stream,
-          collegeId
+          collegeId: walkinForm.collegeId
         })
       });
       const data = await response.json();
@@ -431,8 +647,13 @@ function AdminDashboard() {
 
       setWalkinStatus("Walk-in student created. Credentials generated automatically.");
       setWalkinCredentials(data.credentials);
-      setWalkinForm({ name: "", email: "", phone: "", dob: "", stream: "" });
-      loadStudents();
+      const createdCollegeId = String(walkinForm.collegeId || "").trim();
+      if (createdCollegeId && createdCollegeId !== collegeId) {
+        setSelectedCollegeId(createdCollegeId);
+        localStorage.setItem("collegeId", createdCollegeId);
+      }
+      setWalkinForm((prev) => ({ ...prev, name: "", email: "", phone: "", dob: "", stream: "" }));
+      await loadStudents();
     } catch (err) {
       console.error("Walk-in creation error:", err);
       setWalkinStatus("Server error while creating walk-in student.");
@@ -487,6 +708,10 @@ function AdminDashboard() {
 
       setRegularStatus("Regular student created. Credentials are now active.");
       setRegularCredentials(data.credentials);
+      if (selectedCollegeId && selectedCollegeId !== collegeId) {
+        setSelectedCollegeId(selectedCollegeId);
+        localStorage.setItem("collegeId", selectedCollegeId);
+      }
       setRegularForm((prev) => ({
         ...prev,
         name: "",
@@ -496,7 +721,7 @@ function AdminDashboard() {
         course: "",
         password: ""
       }));
-      loadStudents();
+      await loadStudents();
     } catch (err) {
       console.error("Regular creation error:", err);
       setRegularStatus("Server error while creating regular student.");
@@ -645,6 +870,7 @@ function AdminDashboard() {
                 : student
             )
           );
+          await loadStudents();
           break;
         }
         lastError = data?.message || `Status update failed (${response.status})`;
@@ -704,11 +930,10 @@ function AdminDashboard() {
   }, []);
 
   const fetchWalkinResults = useCallback(async () => {
-    if (!collegeId) return;
     setWalkinResultsLoading(true);
     setWalkinResultsError("");
     try {
-      const response = await fetch(`/admin/walkin/final-results/${collegeId}?t=${Date.now()}`, { cache: "no-store" });
+      const response = await fetch(`/admin/walkin/final-results/ALL?t=${Date.now()}`, { cache: "no-store" });
       const data = await response.json();
       if (Array.isArray(data)) {
         setWalkinResults(data);
@@ -722,17 +947,16 @@ function AdminDashboard() {
     } finally {
       setWalkinResultsLoading(false);
     }
-  }, [collegeId]);
+  }, []);
 
   const recomputeWalkinResults = async () => {
-    if (!collegeId) return;
     setWalkinRecomputeLoading(true);
     setWalkinRecomputeStatus("");
     try {
       const response = await fetch("/admin/walkin/final-results/recompute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ collegeId: Number(collegeId) || collegeId })
+        body: JSON.stringify({})
       });
       const data = await response.json();
       if (!response.ok || !data.success) {
@@ -810,14 +1034,18 @@ function AdminDashboard() {
     }
   };
 
-  const openWalkinReview = async (studentId, examId) => {
-    if (!collegeId) return;
+  const openWalkinReview = async (studentId, examId, reviewCollegeId) => {
+    const scopedCollegeId = String(reviewCollegeId || collegeId || "").trim();
+    if (!scopedCollegeId) {
+      setWalkinReviewError("Missing college scope for selected student.");
+      return;
+    }
     setWalkinReviewLoading(true);
     setWalkinReviewError("");
     setWalkinReviewData(null);
     try {
       const response = await fetch(
-        `/admin/walkin/review/${collegeId}/${studentId}/${examId}?t=${Date.now()}`,
+        `/admin/walkin/review/${scopedCollegeId}/${studentId}/${examId}?t=${Date.now()}`,
         { cache: "no-store" }
       );
       const data = await response.json();
@@ -825,6 +1053,7 @@ function AdminDashboard() {
         throw new Error(data.message || "Could not load answer review");
       }
       setWalkinReviewData(data);
+      setWalkinReviewView("summary");
       setActiveSection("walkin-review");
     } catch (error) {
       console.error("Walk-in review fetch error:", error);
@@ -837,6 +1066,7 @@ function AdminDashboard() {
   const closeWalkinReview = () => {
     setWalkinReviewData(null);
     setWalkinReviewError("");
+    setWalkinReviewView("summary");
     setActiveSection("walkin-results");
   };
 
@@ -861,8 +1091,8 @@ function AdminDashboard() {
   const activeExams = totalActiveExamCount;
   const activeExamsPercent = toPercent(activeExams, totalExamCount || 1);
   const isDashboardView = !showProfile && activeSection === "dashboard";
-  const walkinStudents = students.filter((student) => student.student_type === "WALKIN");
-  const regularStudents = students.filter((student) => student.student_type === "REGULAR");
+  const walkinStudents = students.filter((student) => isWalkinStudentRow(student));
+  const regularStudents = students.filter((student) => !isWalkinStudentRow(student));
   const reviewAnswers = walkinReviewData?.answers || [];
   const reviewSummary = String(walkinReviewData?.performance_summary || "")
     .replace(/Main weak area:[^.]*\.?/gi, "")
@@ -886,6 +1116,34 @@ function AdminDashboard() {
         ? reviewSummaryLines.slice(1).join("\n")
         : reviewSummaryLines.join("\n"))
     : "";
+  const reviewSummaryBodyLines = reviewSummaryBody
+    ? reviewSummaryBody.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    : [];
+  const aptitudeSummary = parseSectionSummary(reviewSummaryBodyLines, "Aptitude");
+  const technicalSummary = parseSectionSummary(reviewSummaryBodyLines, "Technical");
+  const codingSummary =
+    parseCodingSummary(reviewSummaryBodyLines) ||
+    buildCodingSummaryFromAnswers(reviewAnswers) ||
+    parseCodingSummaryFromTopicStats(reviewSummaryBodyLines);
+  const reviewNarrativeLines = reviewSummaryBodyLines
+    .filter((line) => !/^\d+\.\s*(Aptitude|Technical|Coding)\s*:/i.test(line))
+    .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+    .filter(Boolean);
+  const reviewTopicSections = reviewNarrativeLines.map((line) => {
+    const separatorIndex = line.indexOf(":");
+    const hasLabel = separatorIndex > 0;
+    const label = hasLabel ? line.slice(0, separatorIndex).trim() : "Topic";
+    const body = hasLabel ? line.slice(separatorIndex + 1).trim() : line;
+    const pointChunks = body
+      .replace(/\s+/g, " ")
+      .split(/;\s+|\. (?=[A-Z0-9])/)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean);
+    return {
+      label,
+      points: pointChunks.length ? pointChunks : [body]
+    };
+  });
   const walkinResultsRows = useMemo(() => {
     const source = Array.isArray(walkinResults) ? walkinResults : [];
     const query = walkinResultsSearch.trim().toLowerCase();
@@ -1017,7 +1275,7 @@ function AdminDashboard() {
       <header className="dashboard-topbar admin-header" id="admin-overview">
           <div className="topbar-left">
             <div className="brand-logo">
-              <img src="/image.png" alt="RP2 Rounded Professional Program" />
+              <img src="/dashboard-logo.png" alt="RP2 Rounded Professional Program" />
             </div>
           </div>
         <div className="topbar-actions">
@@ -1127,7 +1385,7 @@ function AdminDashboard() {
         </nav>
 
         <div className="sidebar-footer">
-          <p>Need help? support@examportal</p>
+          <p>Need help? Contact your scholarship coordinator.</p>
         </div>
       </aside>
 
@@ -1316,7 +1574,7 @@ function AdminDashboard() {
                               <button
                                 type="button"
                                 className="view-btn"
-                                onClick={() => openWalkinReview(row.student_id, row.exam_id)}
+                                onClick={() => openWalkinReview(row.student_id, row.exam_id, row.college_id)}
                                 disabled={walkinReviewLoading}
                               >
                                 View
@@ -1335,12 +1593,30 @@ function AdminDashboard() {
               {activeSection === "walkin-review" && (
                 <div className="dashboard-section admin-section" id="walkin-review">
                   <div className="walkin-review-head">
-                    <button type="button" className="small-outline-btn" onClick={closeWalkinReview}>
-                      Back to Walk-In Results
-                    </button>
-                    <h2>
-                      {walkinReviewData?.student?.name || "Student"} - Exam {walkinReviewData?.exam_id || "--"}
-                    </h2>
+                    <div className="walkin-review-topline">
+                      <button type="button" className="small-outline-btn" onClick={closeWalkinReview}>
+                        ← Back to Walk-In Results
+                      </button>
+                      <h2>
+                        {walkinReviewData?.student?.name || "Student"} - Exam {walkinReviewData?.exam_id || "--"}
+                      </h2>
+                    </div>
+                    <div className="walkin-review-view-switch">
+                      <button
+                        type="button"
+                        className={`small-outline-btn ${walkinReviewView === "summary" ? "active" : ""}`}
+                        onClick={() => setWalkinReviewView("summary")}
+                      >
+                        Solutions Summary
+                      </button>
+                      <button
+                        type="button"
+                        className={`small-outline-btn ${walkinReviewView === "marks" ? "active" : ""}`}
+                        onClick={() => setWalkinReviewView("marks")}
+                      >
+                        Student Solution
+                      </button>
+                    </div>
                   </div>
                   {walkinReviewLoading && renderTableSkeleton(4)}
                   {walkinReviewError && <p className="auth-help">{walkinReviewError}</p>}
@@ -1349,13 +1625,97 @@ function AdminDashboard() {
                   )}
                   {reviewAnswers.length > 0 && (
                     <div className="walkin-review-list">
-                      {reviewSummary && (
+                      {walkinReviewView === "summary" && reviewSummary && (
                         <div className="walkin-review-card walkin-review-summary">
-                          <p className="item-meta">{reviewSummaryTitle}</p>
-                          {reviewSummaryBody && <p className="item-answer">{reviewSummaryBody}</p>}
+                          <p className="item-meta summary-title">{reviewSummaryTitle}</p>
+                          {(aptitudeSummary || technicalSummary || codingSummary) && (
+                            <div className="summary-score-grid">
+                              {aptitudeSummary && (
+                                <div className="summary-score-card summary-score-card-aptitude">
+                                  <p className="summary-score-label">Aptitude</p>
+                                  <div
+                                    className="summary-donut"
+                                    style={{ "--summary-percent": `${aptitudeSummary.percent}%` }}
+                                  >
+                                    <div className="summary-donut-center">
+                                      <p className="summary-donut-value">{Math.round(aptitudeSummary.percent)}%</p>
+                                      <p className="summary-donut-sub">score</p>
+                                    </div>
+                                  </div>
+                                  <p className="summary-score-marks">
+                                    {aptitudeSummary.scored.toFixed(2)} / {aptitudeSummary.total.toFixed(2)}
+                                  </p>
+                                </div>
+                              )}
+                              {technicalSummary && (
+                                <div className="summary-score-card summary-score-card-technical">
+                                  <p className="summary-score-label">Technical</p>
+                                  <div
+                                    className="summary-donut"
+                                    style={{ "--summary-percent": `${technicalSummary.percent}%` }}
+                                  >
+                                    <div className="summary-donut-center">
+                                      <p className="summary-donut-value">{Math.round(technicalSummary.percent)}%</p>
+                                      <p className="summary-donut-sub">score</p>
+                                    </div>
+                                  </div>
+                                  <p className="summary-score-marks">
+                                    {technicalSummary.scored.toFixed(2)} / {technicalSummary.total.toFixed(2)}
+                                  </p>
+                                </div>
+                              )}
+                              {codingSummary && (
+                                <div className="summary-score-card summary-score-card-coding">
+                                  <p className="summary-score-label">Coding</p>
+                                  <div className="summary-coding-header">
+                                    <p className="summary-coding-total">
+                                      {codingSummary.scored.toFixed(2)} / {codingSummary.total.toFixed(2)}
+                                    </p>
+                                    <p className="summary-coding-total-percent">{Math.round(codingSummary.percent)}%</p>
+                                  </div>
+                                  <div className="summary-coding-levels">
+                                    {codingSummary.levels.map((level) => (
+                                      <div className="summary-coding-level" key={`coding-level-${level.name}`}>
+                                        <p className="summary-coding-level-name">{level.name}</p>
+                                        <div
+                                          className="summary-mini-donut"
+                                          style={{ "--summary-percent": `${level.tcPercent}%` }}
+                                        >
+                                          <span>{Math.round(level.tcPercent)}%</span>
+                                        </div>
+                                        <p className="summary-coding-level-marks">
+                                          {level.scored.toFixed(2)} / {level.total.toFixed(2)}
+                                        </p>
+                                        <p className="summary-coding-level-tc">
+                                          TC {level.passed}/{level.tcTotal}
+                                        </p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          {reviewTopicSections.length > 0 && (
+                            <div className="summary-narrative-list">
+                              <p className="summary-narrative-head">Topic Summary</p>
+                              {reviewTopicSections.map((section, index) => (
+                                <div className="summary-narrative-item" key={`summary-line-${index}`}>
+                                  <p className="summary-narrative-label">{section.label}</p>
+                                  <ul className="summary-narrative-points">
+                                    {section.points.map((point, pointIndex) => (
+                                      <li className="summary-narrative-body" key={`summary-line-${index}-point-${pointIndex}`}>
+                                        {point}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )}
-                      {reviewAnswers.map((reviewQuestion, index) => (
+                      {walkinReviewView === "marks" && reviewAnswers.map((reviewQuestion, index) => (
                         <div className="walkin-review-card" key={`review-${reviewQuestion.submission_id}`}>
                           <p className="item-meta">
                             {reviewQuestion.section_label} | Question {index + 1} | Marks: {Number(reviewQuestion.marks_obtained || 0).toFixed(2)} / {Number(reviewQuestion.full_marks || 0).toFixed(2)}
@@ -1365,11 +1725,6 @@ function AdminDashboard() {
                           {reviewQuestion.question_type === "MCQ" && (
                             <>
                               {renderWalkinOptions(reviewQuestion)}
-                              <p className="item-answer">Selected: {reviewQuestion.selected_option || "No option selected"}</p>
-                              <p className="item-answer">Correct: {reviewQuestion.correct_option || "-"}</p>
-                              <p className="item-answer">
-                                Verdict: {reviewQuestion.selected_option && reviewQuestion.correct_option && reviewQuestion.selected_option === reviewQuestion.correct_option ? "Right" : "Wrong"}
-                              </p>
                             </>
                           )}
 
@@ -1556,11 +1911,13 @@ function AdminDashboard() {
               <>
                 <div className="dashboard-section admin-section" id="walkin-create">
                   <h2>Create Walk-In Student Account</h2>
-                  <form className="form-row form-row-wide" onSubmit={handleWalkinCreation}>
+                  <form className="form-row form-row-wide" autoComplete="off" onSubmit={handleWalkinCreation}>
                     <div className="form-field">
                       <label>Full Name</label>
                       <input
                         type="text"
+                        name="walkin_full_name_input"
+                        autoComplete="new-password"
                         placeholder="Enter full name"
                         value={walkinForm.name}
                         onChange={(event) => setWalkinForm({ ...walkinForm, name: event.target.value })}
@@ -1570,6 +1927,8 @@ function AdminDashboard() {
                       <label>Email</label>
                       <input
                         type="email"
+                        name="walkin_email_input"
+                        autoComplete="new-password"
                         placeholder="Enter email"
                         value={walkinForm.email}
                         onChange={(event) => setWalkinForm({ ...walkinForm, email: event.target.value })}
@@ -1579,6 +1938,8 @@ function AdminDashboard() {
                       <label>Phone Number</label>
                       <input
                         type="text"
+                        name="walkin_phone_input"
+                        autoComplete="new-password"
                         placeholder="Enter contact number"
                         value={walkinForm.phone}
                         onChange={(event) => setWalkinForm({ ...walkinForm, phone: event.target.value })}
@@ -1588,6 +1949,8 @@ function AdminDashboard() {
                       <label>Date of Birth</label>
                       <input
                         type="date"
+                        name="walkin_dob_input"
+                        autoComplete="off"
                         value={walkinForm.dob}
                         onChange={(event) => setWalkinForm({ ...walkinForm, dob: event.target.value })}
                       />
@@ -1606,8 +1969,27 @@ function AdminDashboard() {
                         ))}
                       </select>
                     </div>
+                    <div className="form-field">
+                      <label>College</label>
+                      <select
+                        value={walkinForm.collegeId}
+                        onChange={(event) => setWalkinForm({ ...walkinForm, collegeId: event.target.value })}
+                      >
+                        <option value="">Select college</option>
+                        {collegeOptions.map((college) => (
+                          <option key={`walkin-college-${college.college_id}`} value={college.college_id}>
+                            {college.college_name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                     <button type="submit">Create Walk-In Account</button>
                   </form>
+                  {collegeError && (
+                    <p className="auth-help" style={{ marginTop: 10 }}>
+                      {collegeError}
+                    </p>
+                  )}
                   {walkinStatus && (
                     <p className="auth-help" style={{ marginTop: 10 }}>
                       {walkinStatus}
@@ -1668,7 +2050,7 @@ function AdminDashboard() {
                       {filteredWalkinStudents.map((student) => {
                         const passwordRevealed = Boolean(revealedPasswords[student.student_id]);
                         const isUpdating = Boolean(walkinStatusUpdating[student.student_id]);
-                        const statusLabel = student.student_status || "ACTIVE";
+                        const statusLabel = String(student.student_status || "ACTIVE").trim().toUpperCase();
                         const buttonLabel = statusLabel === "ACTIVE" ? "Deactivate" : "Activate";
                         return (
                           <tr
@@ -1735,6 +2117,8 @@ function AdminDashboard() {
                       <label>Full Name</label>
                       <input
                         type="text"
+                        name="regular_full_name_input"
+                        autoComplete="new-password"
                         placeholder="Enter full name"
                         value={regularForm.name}
                         onChange={(event) => setRegularForm({ ...regularForm, name: event.target.value })}
@@ -1764,8 +2148,9 @@ function AdminDashboard() {
                       <label>Email</label>
                       <input
                         type="email"
+                        name="regular_email_input"
                         placeholder="Enter email"
-                        autoComplete="off"
+                        autoComplete="new-password"
                         value={regularForm.email}
                         onChange={(event) => setRegularForm({ ...regularForm, email: event.target.value })}
                       />
@@ -1774,6 +2159,8 @@ function AdminDashboard() {
                       <label>Phone Number</label>
                       <input
                         type="text"
+                        name="regular_phone_input"
+                        autoComplete="new-password"
                         placeholder="Enter contact number"
                         value={regularForm.phone}
                         onChange={(event) => setRegularForm({ ...regularForm, phone: event.target.value })}
@@ -1783,6 +2170,8 @@ function AdminDashboard() {
                       <label>Date of Birth</label>
                       <input
                         type="date"
+                        name="regular_dob_input"
+                        autoComplete="off"
                         value={regularForm.dob}
                         onChange={(event) => setRegularForm({ ...regularForm, dob: event.target.value })}
                       />
@@ -1805,6 +2194,7 @@ function AdminDashboard() {
                       <label>Password</label>
                       <input
                         type="password"
+                        name="regular_password_input"
                         placeholder="Set password"
                         autoComplete="new-password"
                         value={regularForm.password}
@@ -1871,7 +2261,7 @@ function AdminDashboard() {
                       {filteredRegularStudents.map((student) => {
                         const passwordRevealed = Boolean(revealedPasswords[student.student_id]);
                         const isUpdating = Boolean(walkinStatusUpdating[student.student_id]);
-                        const statusLabel = student.student_status || "ACTIVE";
+                        const statusLabel = String(student.student_status || "ACTIVE").trim().toUpperCase();
                         const buttonLabel = statusLabel === "ACTIVE" ? "Deactivate" : "Activate";
                         return (
                           <tr
@@ -2011,10 +2401,10 @@ function AdminDashboard() {
                 <h2>Colleges</h2>
                 <form className="form-row form-row-wide" onSubmit={handleCreateCollege}>
                   <div className="field-block">
-                    <label htmlFor="newCollegeName">College Name</label>
                     <input
                       id="newCollegeName"
                       type="text"
+                      aria-label="College name"
                       placeholder="Enter college name"
                       value={newCollegeName}
                       onChange={(event) => setNewCollegeName(event.target.value)}
@@ -2278,6 +2668,17 @@ function AdminDashboard() {
           </section>
         </main>
       </div>
+      <footer className="dashboard-footer-pro">
+        <div className="dashboard-footer-logo-row">
+          <img
+            className="dashboard-footer-logo"
+            src="/image.png"
+            alt="RP2 Rounded Professional Program - Elevating Employability"
+          />
+        </div>
+        <div className="dashboard-footer-divider" />
+        <p className="dashboard-footer-copy">© 2026 RP2 Inc. All rights reserved.</p>
+      </footer>
     </div>
   );
 }

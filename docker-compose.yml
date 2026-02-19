@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: exam-portal-app
+    env_file:
+      - Backend/.env
+    environment:
+      NODE_ENV: production
+    ports:
+      - "5000:5000"
+    restart: unless-stopped

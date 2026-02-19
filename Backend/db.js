@@ -44,6 +44,9 @@ const usePgSsl =
     (!process.env.PG_SSL && !isLocalPgHost);
 const rejectUnauthorized =
     String(process.env.PG_SSL_REJECT_UNAUTHORIZED || "false").toLowerCase() === "true";
+const pgConnectTimeoutMs = Number(process.env.PG_CONNECT_TIMEOUT_MS || 5000);
+const pgQueryTimeoutMs = Number(process.env.PG_QUERY_TIMEOUT_MS || 30000);
+const pgKeepAliveDelayMs = Number(process.env.PG_KEEPALIVE_INITIAL_DELAY_MS || 10000);
 
 if (!pgUser || !pgPassword || !pgDatabase) {
     console.error("PostgreSQL env configuration is incomplete. Set PG_USER, PG_PASSWORD, and PG_DATABASE in Backend/.env");
@@ -57,8 +60,28 @@ const pool = new Pool({
     database: pgDatabase,
     ssl: usePgSsl ? { rejectUnauthorized } : false,
     max: Number(process.env.PG_POOL_MAX || 10),
-    idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000)
+    idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
+    connectionTimeoutMillis: pgConnectTimeoutMs,
+    query_timeout: pgQueryTimeoutMs,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: pgKeepAliveDelayMs
 });
+
+const withConnectionHint = (error) => {
+    const code = String(error?.code || "").toUpperCase();
+    const message = String(error?.message || "");
+    const isTimeout =
+        code === "ETIMEDOUT" ||
+        /connection timeout|connect etimedout|connection terminated due to connection timeout/i.test(message);
+    if (!isTimeout) {
+        return error;
+    }
+
+    const hinted = new Error(
+        `connect ETIMEDOUT ${pgHost}:${pgPort}. Verify PG_HOST/PG_PORT, PostgreSQL firewall rules, and network reachability.`
+    );
+    return Object.assign(hinted, error, { code: "ETIMEDOUT" });
+};
 
 const convertMysqlPlaceholdersToPg = (sql) => {
     let idx = 0;
@@ -106,7 +129,12 @@ const db = {
         }
 
         const pgSql = convertMysqlPlaceholdersToPg(sql);
-        const queryPromise = pool.query(pgSql, params).then((result) => [normalizePgResult(result), []]);
+        const queryPromise = pool
+            .query(pgSql, params)
+            .then((result) => [normalizePgResult(result), []])
+            .catch((err) => {
+                throw withConnectionHint(err);
+            });
 
         if (typeof cb === "function") {
             queryPromise
@@ -125,7 +153,7 @@ pool
         console.log("PostgreSQL connected successfully");
     })
     .catch((err) => {
-        console.error("PostgreSQL connection failed:", err);
+        console.error("PostgreSQL connection failed:", withConnectionHint(err));
     });
 
 module.exports = db;

@@ -1168,22 +1168,334 @@
 
 .walkin-review-card {
     margin-top: 18px;
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid #6a7fb5;
     border-radius: 16px;
-    background: rgba(10, 14, 30, 0.55);
+    background: #101a30;
     padding: 16px;
+    box-shadow: 0 10px 20px rgba(7, 12, 30, 0.38);
 }
 
-.walkin-review-summary .item-answer {
-    white-space: pre-line;
+.walkin-review-summary {
+    background: #142448;
+    border: 1px solid #7389bf;
+    padding: 20px;
+}
+
+.walkin-review-summary .summary-title {
+    font-size: 1.3rem;
+    letter-spacing: 0.02em;
+    color: #c9d3ff;
+    font-weight: 800;
+    text-shadow: 0 1px 0 rgba(0, 0, 0, 0.35);
+    border-bottom: 1px solid rgba(143, 176, 236, 0.45);
+    padding-bottom: 8px;
+}
+
+.summary-score-grid {
+    margin-top: 14px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+    gap: 14px;
+}
+
+.summary-score-card {
+    border: 1px solid #6f85be;
+    border-radius: 16px;
+    padding: 14px;
+    background: #1b3157;
+    display: grid;
+    gap: 10px;
+    align-content: start;
+    min-height: 178px;
+    box-shadow: 0 10px 18px rgba(6, 14, 34, 0.35);
+}
+
+.summary-score-card-aptitude {
+    background: #1e385f;
+    border-color: #7fb8ea;
+    box-shadow:
+        inset 0 0 0 1px #71ceff,
+        0 8px 18px rgba(14, 165, 233, 0.24);
+}
+
+.summary-score-card-technical {
+    background: #233861;
+    border-color: #8fa9e6;
+    box-shadow:
+        inset 0 0 0 1px #b0beff,
+        0 8px 18px rgba(99, 102, 241, 0.24);
+}
+
+.summary-score-card-coding {
+    background: #1d355f;
+    border-color: #86a4dd;
+    box-shadow:
+        inset 0 0 0 1px #a2bfea,
+        0 8px 18px rgba(37, 99, 235, 0.22);
+    grid-column: 1 / -1;
+}
+
+.summary-score-label {
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    color: #e8eeff;
+    font-weight: 700;
+    background: rgba(25, 50, 87, 0.9);
+    border: 1px solid #89aeea;
+    border-radius: 999px;
+    padding: 5px 10px;
+    justify-self: start;
+}
+
+.summary-score-card-aptitude .summary-score-label {
+    background: rgba(66, 77, 108, 0.92);
+    border-color: #7dc4f0;
+    color: #e8eeff;
+}
+
+.summary-score-card-technical .summary-score-label {
+    background: rgba(63, 72, 110, 0.92);
+    border-color: #9caef0;
+    color: #e8eeff;
+}
+
+.summary-score-card-coding .summary-score-label {
+    background: rgba(64, 78, 112, 0.92);
+    border-color: #8eb3ea;
+    color: #e8eeff;
+}
+
+.summary-donut {
+    --summary-percent: 0%;
+    width: 124px;
+    height: 124px;
+    margin: 2px auto;
+    border-radius: 50%;
+    background: conic-gradient(#38bdf8 var(--summary-percent), rgba(148, 163, 184, 0.22) 0);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2), 0 8px 18px rgba(56, 189, 248, 0.22);
+}
+
+.summary-score-card-technical .summary-donut {
+    background: conic-gradient(#818cf8 var(--summary-percent), rgba(148, 163, 184, 0.22) 0);
+    box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.2), 0 8px 18px rgba(129, 140, 248, 0.22);
+}
+
+.summary-donut-center {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    align-content: center;
+    background: #1a2c4e;
+    border: 1px solid #8fb0ec;
+}
+
+.summary-donut-value {
+    margin: 0;
+    line-height: 1;
+    font-size: 28px;
+    color: #e8eeff;
+    font-weight: 800;
+}
+
+.summary-donut-sub {
+    margin: 2px 0 0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    color: #c9d3ff;
+    font-weight: 700;
+}
+
+.summary-score-marks {
+    margin: 0;
+    text-align: center;
+    font-weight: 700;
+    color: #e8eeff;
+    font-size: 1.2rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+}
+
+.summary-coding-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid #6f8fcc;
+    padding-bottom: 8px;
+}
+
+.summary-coding-total {
+    margin: 0;
+    color: #e8eeff;
+    font-weight: 800;
+    font-size: 1.18rem;
+}
+
+.summary-coding-total-percent {
+    margin: 0;
+    color: #c9d3ff;
+    font-weight: 800;
+    font-size: 1.18rem;
+}
+
+.summary-coding-levels {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(100px, 1fr));
+    gap: 10px;
+}
+
+.summary-coding-level {
+    border: 1px solid #7397d2;
+    border-radius: 14px;
+    padding: 10px 8px;
+    background: #243f69;
+    text-align: center;
+    box-shadow: 0 6px 12px rgba(7, 13, 34, 0.34);
+}
+
+.summary-coding-level:nth-child(1) {
+    border-color: #63bff2;
+}
+
+.summary-coding-level:nth-child(2) {
+    border-color: #7aa6ff;
+}
+
+.summary-coding-level:nth-child(3) {
+    border-color: #68d9c7;
+}
+
+.summary-coding-level-name {
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    color: #e8eeff;
+    font-weight: 700;
+}
+
+.summary-mini-donut {
+    --summary-percent: 0%;
+    width: 58px;
+    height: 58px;
+    margin: 6px auto 4px;
+    border-radius: 50%;
+    background: conic-gradient(#3b82f6 var(--summary-percent), rgba(147, 197, 253, 0.35) 0);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.summary-mini-donut span {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: #22365f;
+    color: #e8eeff;
+    font-weight: 800;
+    font-size: 12px;
+}
+
+.summary-coding-level-marks,
+.summary-coding-level-tc {
+    margin: 0;
+    font-size: 13px;
+    color: #e8eeff;
+    font-weight: 700;
+}
+
+.summary-coding-level-tc {
+    color: #c9d3ff;
+}
+
+.summary-narrative-list {
+    margin-top: 14px;
+    display: grid;
+    gap: 10px;
+    background: #162745;
+    border: 1px solid #6f8fcc;
+    border-radius: 14px;
+    padding: 14px;
+}
+
+.summary-narrative-head {
+    margin: 0;
+    color: #c9d3ff;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-size: 0.95rem;
+    border-bottom: 1px solid rgba(143, 176, 236, 0.35);
+    padding-bottom: 8px;
+}
+
+.summary-narrative-item {
+    margin: 0;
+    padding: 8px 0 0;
+    border-top: 1px dashed rgba(143, 176, 236, 0.25);
+}
+
+.summary-narrative-item:first-of-type {
+    border-top: none;
+    padding-top: 0;
+}
+
+.summary-narrative-label {
+    margin: 0 0 6px;
+    color: #c9d3ff;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    font-size: 0.95em;
+}
+
+.summary-narrative-points {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 4px;
+}
+
+.summary-narrative-body {
+    color: #e8eeff;
+    line-height: 1.5;
+}
+
+@media (max-width: 760px) {
+    .summary-score-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .summary-score-card-coding {
+        grid-column: auto;
+    }
+
+    .summary-coding-levels {
+        grid-template-columns: 1fr;
+    }
 }
 
 .walkin-review-head {
+    display: grid;
+    gap: 10px;
+}
+
+.walkin-review-topline {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
+    gap: 16px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.3);
+    padding-bottom: 10px;
 }
 
 .walkin-results-head {
@@ -1200,7 +1512,42 @@
 
 .walkin-review-head h2 {
     margin: 0;
-    color: #f5f7ff;
+    color: #edf4ff;
+    text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 1.14rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.walkin-review-topline .small-outline-btn {
+    border-color: rgba(242, 208, 126, 0.7);
+    background: linear-gradient(145deg, #f7e4a8, #f2d07e);
+    color: #1e2a4b;
+    font-weight: 700;
+    box-shadow: 0 6px 14px rgba(242, 208, 126, 0.28);
+}
+
+.walkin-review-view-switch .small-outline-btn {
+    border-color: #7898d4;
+    background: #2a3f6d;
+    color: #ffe4ae;
+    font-weight: 700;
+}
+
+.walkin-review-view-switch {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.walkin-review-view-switch .small-outline-btn.active {
+    border-color: #f2d07e;
+    color: #1f2d4a;
+    background: linear-gradient(145deg, #f6e8b7, #f2d07e);
+    box-shadow: 0 6px 14px rgba(242, 208, 126, 0.25);
 }
 
 .walkin-review-list {
@@ -1209,23 +1556,40 @@
     margin-top: 12px;
 }
 
+.marks-summary-card .table-shell {
+    margin-top: 10px;
+}
+
+.marks-summary-card .sticky-table td,
+.marks-summary-card .sticky-table th {
+    text-align: left;
+}
+
+.marks-total-row td {
+    font-weight: 700;
+    color: #f8e2a5;
+}
+
 .walkin-sheet-item .item-meta,
 .walkin-review-card .item-meta {
     color: #c9d3ff;
     font-weight: 600;
+    font-size: 1.08rem;
+    line-height: 1.5;
 }
 
 .walkin-sheet-item .item-text,
 .walkin-review-card .item-text {
     color: #f2f6ff;
-    font-size: 1.02rem;
-    line-height: 1.5;
+    font-size: 1.2rem;
+    line-height: 1.62;
 }
 
 .walkin-sheet-item .item-answer,
 .walkin-review-card .item-answer {
     color: #e8eeff;
-    line-height: 1.45;
+    font-size: 1.08rem;
+    line-height: 1.58;
 }
 
 .walkin-review-card .item-answer-student {
@@ -1236,23 +1600,111 @@
     color: #fff1c9;
 }
 
+.mcq-review-panel {
+    margin-top: 8px;
+    display: grid;
+    gap: 8px;
+}
+
+.mcq-answer-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(220px, 1fr));
+    gap: 10px;
+}
+
+.mcq-answer-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(13, 26, 56, 0.55);
+    border: 1px solid rgba(138, 158, 208, 0.28);
+}
+
+.mcq-answer-label {
+    color: #b9c9f6;
+    font-weight: 600;
+}
+
+.mcq-answer-value {
+    color: #f4f7ff;
+    font-weight: 700;
+}
+
+.mcq-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    font-size: 0.9rem;
+    font-weight: 800;
+    line-height: 1;
+    border: 1px solid transparent;
+    flex: 0 0 auto;
+}
+
+.mcq-icon.correct {
+    color: #0f2a16;
+    background: #35d07f;
+    border-color: rgba(83, 224, 138, 0.7);
+}
+
+.mcq-icon.wrong {
+    color: #300d0f;
+    background: #ff6c7a;
+    border-color: rgba(255, 127, 141, 0.7);
+}
+
+.mcq-verdict {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    padding: 7px 12px;
+    border-radius: 999px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.mcq-verdict.correct {
+    color: #bff7d8;
+    background: rgba(35, 168, 96, 0.18);
+    border: 1px solid rgba(83, 224, 138, 0.45);
+}
+
+.mcq-verdict.wrong {
+    color: #ffd3d8;
+    background: rgba(210, 66, 83, 0.2);
+    border: 1px solid rgba(255, 127, 141, 0.45);
+}
+
 .admin-dashboard .walkin-options .item-option,
 .admin-dashboard .walkin-review-list .walkin-options .item-option {
     color: #e8eeff;
     display: grid !important;
-    grid-template-columns: 22px auto;
-    align-items: baseline;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    align-items: center;
     justify-content: start !important;
-    column-gap: 8px;
+    column-gap: 10px;
     margin: 4px 0;
     width: auto !important;
     text-align: left !important;
+    font-size: 1.06rem;
+    line-height: 1.55;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background: rgba(14, 24, 52, 0.45);
 }
 
 .admin-dashboard .walkin-options .option-label,
 .admin-dashboard .walkin-review-list .walkin-options .option-label {
     color: #f2d07e;
     font-weight: 700;
+    font-size: 1.03rem;
     min-width: 18px;
     flex: 0 0 auto;
 }
@@ -1260,7 +1712,71 @@
 .admin-dashboard .walkin-options .option-text,
 .admin-dashboard .walkin-review-list .walkin-options .option-text {
     color: #e8eeff;
+    font-size: 1.06rem;
     text-align: left !important;
+}
+
+.admin-dashboard .walkin-options .item-option.option-selected-correct,
+.admin-dashboard .walkin-review-list .walkin-options .item-option.option-selected-correct {
+    background: rgba(46, 185, 111, 0.2);
+    border-color: rgba(90, 224, 148, 0.52);
+}
+
+.admin-dashboard .walkin-options .item-option.option-selected-wrong,
+.admin-dashboard .walkin-review-list .walkin-options .item-option.option-selected-wrong {
+    background: rgba(217, 76, 96, 0.22);
+    border-color: rgba(255, 131, 145, 0.55);
+}
+
+.admin-dashboard .walkin-options .item-option.option-correct-answer,
+.admin-dashboard .walkin-review-list .walkin-options .item-option.option-correct-answer {
+    background: rgba(37, 113, 182, 0.18);
+    border-color: rgba(120, 180, 255, 0.42);
+}
+
+.admin-dashboard .walkin-options .option-result-badge,
+.admin-dashboard .walkin-review-list .walkin-options .option-result-badge {
+    font-size: 0.82rem;
+    letter-spacing: 0.02em;
+    font-weight: 700;
+    border-radius: 999px;
+    padding: 4px 9px;
+    background: rgba(16, 26, 56, 0.65);
+    color: #d6e2ff;
+    border: 1px solid rgba(151, 173, 232, 0.35);
+    white-space: nowrap;
+}
+
+.admin-dashboard .walkin-options .item-option.option-selected-correct .option-result-badge,
+.admin-dashboard .walkin-review-list .walkin-options .item-option.option-selected-correct .option-result-badge {
+    color: #beffd5;
+    border-color: rgba(90, 224, 148, 0.55);
+    background: rgba(22, 86, 53, 0.5);
+}
+
+.admin-dashboard .walkin-options .item-option.option-selected-wrong .option-result-badge,
+.admin-dashboard .walkin-review-list .walkin-options .item-option.option-selected-wrong .option-result-badge {
+    color: #ffd6dc;
+    border-color: rgba(255, 131, 145, 0.55);
+    background: rgba(110, 29, 43, 0.5);
+}
+
+@media (max-width: 760px) {
+    .mcq-answer-row {
+        grid-template-columns: 1fr;
+    }
+
+    .admin-dashboard .walkin-options .item-option,
+    .admin-dashboard .walkin-review-list .walkin-options .item-option {
+        grid-template-columns: 22px minmax(0, 1fr);
+        row-gap: 6px;
+    }
+
+    .admin-dashboard .walkin-options .option-result-badge,
+    .admin-dashboard .walkin-review-list .walkin-options .option-result-badge {
+        grid-column: 2;
+        width: fit-content;
+    }
 }
 
 .walkin-code-block {

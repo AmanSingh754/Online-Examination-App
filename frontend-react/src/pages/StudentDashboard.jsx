@@ -33,7 +33,14 @@ function StudentDashboard() {
 
   const loadAvailableExams = async () => {
     try {
-      const response = await fetch(`/student/exams/${studentId}`);
+      const response = await fetch(`/student/exams/${studentId}`, {
+        credentials: "include",
+        cache: "no-store"
+      });
+      if (response.status === 401 || response.status === 403) {
+        navigate("/student/login");
+        return;
+      }
       const data = await response.json();
       setAvailableExams(Array.isArray(data) ? data : []);
     } catch (err) {
@@ -44,7 +51,14 @@ function StudentDashboard() {
 
   const loadAttemptedExams = async () => {
     try {
-      const response = await fetch(`/student/attempted-exams/${studentId}`);
+      const response = await fetch(`/student/attempted-exams/${studentId}`, {
+        credentials: "include",
+        cache: "no-store"
+      });
+      if (response.status === 401 || response.status === 403) {
+        navigate("/student/login");
+        return;
+      }
       const data = await response.json();
       setAttemptedExams(Array.isArray(data) ? data : []);
     } catch (err) {
@@ -138,7 +152,7 @@ function StudentDashboard() {
       <header className="dashboard-topbar student-header" id="student-overview">
         <div className="topbar-left">
           <div className="brand-logo">
-            <img src="/image.png" alt="RP2 Rounded Professional Program" />
+            <img src="/dashboard-logo.png" alt="RP2 Rounded Professional Program" />
           </div>
         </div>
         <div className="topbar-actions">
@@ -212,7 +226,7 @@ function StudentDashboard() {
           </nav>
 
           <div className="sidebar-footer">
-            <p>Need help? support@examportal</p>
+            <p>Need help? Contact your scholarship coordinator.</p>
           </div>
         </aside>
 
@@ -370,6 +384,17 @@ function StudentDashboard() {
           </section>
         </main>
       </div>
+      <footer className="dashboard-footer-pro">
+        <div className="dashboard-footer-logo-row">
+          <img
+            className="dashboard-footer-logo"
+            src="/image.png"
+            alt="RP2 Rounded Professional Program - Elevating Employability"
+          />
+        </div>
+        <div className="dashboard-footer-divider" />
+        <p className="dashboard-footer-copy">© 2026 RP2 Inc. All rights reserved.</p>
+      </footer>
     </div>
   );
 }

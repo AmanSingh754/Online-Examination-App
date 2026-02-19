@@ -175,12 +175,146 @@ function extractErrorMessage(error) {
 function normalizeSummaryText(text) {
     const cleaned = String(text || "")
         .replace(/Main weak area:[^.]*\.?/gi, "")
+        .replace(/Promotion blocked[^.\n]*[.\n]?/gi, "")
+        .replace(/Next milestone[^.\n]*[.\n]?/gi, "")
         .replace(/\r\n/g, "\n")
         .split("\n")
         .map((line) => line.replace(/\s+/g, " ").trim())
+        .filter((line) => !/promotion blocked|next milestone/i.test(line))
         .filter(Boolean)
         .join("\n");
     return cleaned.trim();
+}
+
+const INTERNAL_SKILL_TOPICS = [
+    {
+        name: "SQL",
+        patterns: [/\bsql\b/i, /\bjoin\b/i, /\bgroup\s+by\b/i, /\bwhere\b/i, /\bindex(?:es)?\b/i, /\bprimary\s+key\b/i, /\bforeign\s+key\b/i, /\bnormali[sz]ation\b/i]
+    },
+    {
+        name: "Power BI",
+        patterns: [/\bpower\s*bi\b/i, /\bdax\b/i, /\bpower\s*query\b/i, /\bmeasure(?:s)?\b/i, /\bdata\s+model(?:ing)?\b/i, /\bvisuali[sz]ation\b/i]
+    },
+    {
+        name: "Excel",
+        patterns: [/\bexcel\b/i, /\bvlookup\b/i, /\bxlookup\b/i, /\bpivot\s*table\b/i, /\bspreadsheet\b/i]
+    },
+    {
+        name: "Python",
+        patterns: [/\bpython\b/i, /\bpandas\b/i, /\bnumpy\b/i, /\bdef\b/i]
+    },
+    {
+        name: "JavaScript",
+        patterns: [/\bjavascript\b/i, /\becmascript\b/i, /\bjs\b/i, /\basync\b/i, /\bpromise\b/i]
+    },
+    {
+        name: "React",
+        patterns: [/\breact\b/i, /\bjsx\b/i, /\buseeffect\b/i, /\bstate\b/i, /\bprops\b/i]
+    },
+    {
+        name: "Node.js",
+        patterns: [/\bnode(?:\.js)?\b/i, /\bexpress\b/i, /\bapi\b/i, /\bmiddleware\b/i]
+    },
+    {
+        name: "DBMS",
+        patterns: [/\bdbms\b/i, /\bacid\b/i, /\btransaction\b/i, /\bnormali[sz]ation\b/i, /\ber\s+diagram\b/i]
+    },
+    {
+        name: "DSA",
+        patterns: [/\balgorithm\b/i, /\bcomplexity\b/i, /\bbig[\s-]?o\b/i, /\barray\b/i, /\bstack\b/i, /\bqueue\b/i, /\btree\b/i, /\bgraph\b/i]
+    }
+];
+
+function detectInternalSkillTopic(questionText, referenceAnswer) {
+    const haystack = `${String(questionText || "")} ${String(referenceAnswer || "")}`;
+    let bestName = "";
+    let bestScore = 0;
+    for (const topic of INTERNAL_SKILL_TOPICS) {
+        let score = 0;
+        for (const pattern of topic.patterns) {
+            if (pattern.test(haystack)) score += 1;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            bestName = topic.name;
+        }
+    }
+    return bestScore > 0 ? bestName : "";
+}
+
+function buildDescriptiveSkillAnalytics(rows = []) {
+    const buckets = {};
+    for (const row of rows || []) {
+        const qType = String(row.question_type || "").toLowerCase();
+        if (!qType.includes("descriptive")) continue;
+
+        const topic = detectInternalSkillTopic(row.question_text, row.reference_answer);
+        if (!topic) continue;
+
+        if (!buckets[topic]) {
+            buckets[topic] = {
+                skill: topic,
+                attempted: 0,
+                answered: 0,
+                scored: 0,
+                max: 0,
+                clarityLow: 0
+            };
+        }
+
+        const scored = Number(row.marks_obtained || 0);
+        const max = Number(row.full_marks || 0);
+        const answerText = String(row.descriptive_answer || "").trim();
+        const referenceText = String(row.reference_answer || "").trim();
+        const answerWords = normalizeSentenceText(answerText).split(/\s+/).filter(Boolean).length;
+        const refWords = normalizeSentenceText(referenceText).split(/\s+/).filter(Boolean).length;
+        const minExpected = refWords > 0 ? Math.max(6, Math.ceil(refWords * 0.35)) : 6;
+
+        buckets[topic].attempted += 1;
+        buckets[topic].scored += scored;
+        buckets[topic].max += max;
+        if (answerText) {
+            buckets[topic].answered += 1;
+            if (answerWords > 0 && answerWords < minExpected) {
+                buckets[topic].clarityLow += 1;
+            }
+        } else {
+            buckets[topic].clarityLow += 1;
+        }
+    }
+
+    const skills = Object.values(buckets)
+        .map((entry) => {
+            const pct = entry.max > 0 ? Math.round((entry.scored / entry.max) * 100) : 0;
+            const answerRate = entry.attempted > 0 ? entry.answered / entry.attempted : 0;
+            const clarityRiskRate = entry.attempted > 0 ? entry.clarityLow / entry.attempted : 0;
+            let level = "Moderate";
+            if (pct >= 70 && answerRate >= 0.75) level = "Strong";
+            else if (pct < 50 || clarityRiskRate >= 0.5) level = "Weak";
+            return {
+                ...entry,
+                pct,
+                answerRate: Number(answerRate.toFixed(2)),
+                clarityRiskRate: Number(clarityRiskRate.toFixed(2)),
+                level
+            };
+        })
+        .sort((a, b) => (b.max - a.max) || (a.pct - b.pct));
+
+    const strongSkills = skills
+        .filter((s) => s.level === "Strong")
+        .slice(0, 3)
+        .map((s) => `${s.skill} (${s.pct}%, ${s.attempted}Q)`);
+    const weakSkills = skills
+        .filter((s) => s.level === "Weak")
+        .slice(0, 3)
+        .map((s) => `${s.skill} (${s.pct}%, ${s.attempted}Q)`);
+
+    return {
+        skills,
+        strongSkills,
+        weakSkills
+    };
 }
 
 function buildMandatorySectionLines(analytics) {
@@ -231,9 +365,38 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
         points4To8.push(text);
     }
 
+    const sectionTitles = [
+        "Strengths",
+        "Areas for Improvement",
+        "Communication and Writing Skills",
+        "Topic-wise Stats",
+        "Overall Advisor Note"
+    ];
+    const stripLegacyLabel = (value = "") =>
+        String(value || "")
+            .replace(/^(internal topics\s*-\s*good at|good areas\/strengths|strengths)\s*:\s*/i, "")
+            .replace(/^(internal topics\s*-\s*needs labor|major weaknesses|areas for improvement)\s*:\s*/i, "")
+            .replace(/^(grammar\/spelling(?:\/clarity)?|communication and writing skills)\s*:\s*/i, "")
+            .replace(/^(topic-wise stats(?:\s*\+\s*internal skills \(from descriptive q&a\))?|topic-wise stats)\s*:\s*/i, "")
+            .replace(/^(styled suggestions \+ final review|overall advisor note)\s*:\s*/i, "")
+            .trim();
+    const isGenericPlaceholder = (value = "", heading = "") => {
+        const clean = String(value || "").trim().toLowerCase().replace(/[.:]/g, "");
+        const headingClean = String(heading || "").trim().toLowerCase().replace(/[.:]/g, "");
+        if (!clean) return true;
+        if (clean === headingClean) return true;
+        if (clean === "na" || clean === "n/a" || clean === "none" || clean === "not available") return true;
+        return clean.length < 8;
+    };
+
     const rebuilt = [title, ...mandatory];
-    for (let i = 0; i < points4To8.length; i += 1) {
-        rebuilt.push(`${i + 4}. ${points4To8[i]}`);
+    for (let i = 0; i < 5; i += 1) {
+        const sectionTitle = sectionTitles[i] || `Point ${i + 4}`;
+        const preferred = stripLegacyLabel(points4To8[i] || "");
+        const fallbackBody = stripLegacyLabel(fallbackPointTexts[i] || "");
+        const body = isGenericPlaceholder(preferred, sectionTitle) ? fallbackBody : preferred;
+        if (isGenericPlaceholder(body, sectionTitle)) continue;
+        rebuilt.push(`${i + 4}. ${sectionTitle}: ${body}`);
     }
     return normalizeSummaryText(rebuilt.join("\n"));
 }
@@ -249,6 +412,7 @@ function buildWalkinSummaryAnalytics(rows = []) {
         medium: { scored: 0, max: 0, passed: 0, total: 0, attempted: 0 },
         hard: { scored: 0, max: 0, passed: 0, total: 0, attempted: 0 }
     };
+    const topicTotals = {};
 
     for (const row of rows || []) {
         const section = String(row.section_label || "").trim();
@@ -276,6 +440,18 @@ function buildWalkinSummaryAnalytics(rows = []) {
             codingDifficulty[bucket].total += Number(row.total_testcases || 0);
             codingDifficulty[bucket].attempted += 1;
         }
+
+        const questionType = String(row.question_type || "").trim().toUpperCase() || "UNKNOWN";
+        const topicKey =
+            sectionKey === "Coding"
+                ? `Coding-${String(row.coding_difficulty || "hard").trim().toUpperCase()}`
+                : `${sectionKey}-${questionType}`;
+        if (!topicTotals[topicKey]) {
+            topicTotals[topicKey] = { scored: 0, max: 0, attempted: 0 };
+        }
+        topicTotals[topicKey].scored += scored;
+        topicTotals[topicKey].max += max;
+        topicTotals[topicKey].attempted += 1;
     }
 
     const pct = (scored, max) => (max > 0 ? Math.round((scored / max) * 100) : 0);
@@ -303,12 +479,25 @@ function buildWalkinSummaryAnalytics(rows = []) {
         majorWeaknessHints.push("Hard coding (algorithmic depth/problem decomposition)");
     }
 
+    const topicBreakdown = Object.entries(topicTotals)
+        .map(([topic, stats]) => ({
+            topic,
+            scored: Number(stats.scored || 0),
+            max: Number(stats.max || 0),
+            attempted: Number(stats.attempted || 0),
+            pct: stats.max > 0 ? Math.round((stats.scored / stats.max) * 100) : 0
+        }))
+        .sort((a, b) => (b.max - a.max) || (a.pct - b.pct));
+    const internalSkills = buildDescriptiveSkillAnalytics(rows);
+
     return {
         sectionTotals,
         sectionPct,
         codingDifficulty,
         codingPassRate,
-        majorWeaknessHints
+        majorWeaknessHints,
+        topicBreakdown,
+        internalSkills
     };
 }
 
@@ -492,6 +681,7 @@ function buildDeterministicWalkinSummary(student, rows) {
         medium: { scored: 0, max: 0, passed: 0, total: 0 },
         hard: { scored: 0, max: 0, passed: 0, total: 0 }
     };
+    const topicTotals = {};
     for (const row of rows || []) {
         const section = String(row.section_label || "Unknown");
         const sectionKey = sectionStats[section] ? section : "Technical";
@@ -517,6 +707,18 @@ function buildDeterministicWalkinSummary(student, rows) {
             codingByDifficulty[bucket].passed += Number(row.testcases_passed || 0);
             codingByDifficulty[bucket].total += Number(row.total_testcases || 0);
         }
+
+        const questionType = String(row.question_type || "").trim().toUpperCase() || "UNKNOWN";
+        const topicKey =
+            sectionKey === "Coding"
+                ? `Coding-${String(row.coding_difficulty || "Hard").trim()}`
+                : `${sectionKey}-${questionType}`;
+        if (!topicTotals[topicKey]) {
+            topicTotals[topicKey] = { scored: 0, max: 0, attempted: 0 };
+        }
+        topicTotals[topicKey].scored += scored;
+        topicTotals[topicKey].max += max;
+        topicTotals[topicKey].attempted += 1;
     }
 
     const fmt = (scored, max) => `${Number(scored || 0).toFixed(2)}/${Number(max || 0).toFixed(2)}`;
@@ -575,32 +777,56 @@ function buildDeterministicWalkinSummary(student, rows) {
     const strengthsLine = strengths.length
         ? strengths.slice(0, 2).join("; ")
         : "Shows willingness to attempt across sections, with scope to improve outcomes.";
-    const suggestions = [
-        technicalPctValue < 55 ? "Revise SQL joins/constraints, DB normalization, and API-data flow basics." : null,
-        codingPct < 70 ? "Practice testcase-first coding: handle edge cases, null/empty inputs, and boundary values." : null,
-        aptitudePct < 50 ? "Do daily timed sets for percentages, ratios, and arithmetic shortcuts." : null
-    ].filter(Boolean).slice(0, 3);
-    const suggestionLine = suggestions.length
-        ? suggestions.join(" ")
-        : "Continue mixed practice across aptitude, technical theory, and coding to sustain balance.";
-    const actionPlanLine =
-        "Advice + Plan (next 7 days): 1) 30 mins aptitude drills, 2) 45 mins technical concept revision with short written answers, 3) 60 mins coding with post-run testcase analysis and 15 mins post-mortem for failed tests.";
-    const overview = hardCodingWeak
-        ? "Overall: Student is doing well in easier sections but must labor hard on harder coding problems to become interview-ready."
-        : technicalPct <= 0.5
-            ? "Overall: Coding potential is visible, but technical depth and expression need focused improvement."
-            : "Overall: Balanced progress with room to improve consistency and exam-time accuracy.";
+    const topicStatsLine = Object.entries(topicTotals)
+        .map(([topic, stats]) => {
+            const topicPct = stats.max > 0 ? Math.round((stats.scored / stats.max) * 100) : 0;
+            const topicLevel = topicPct >= 70 ? "Strong" : topicPct >= 50 ? "Moderate" : "Weak";
+            return {
+                text: `${topic} ${fmt(stats.scored, stats.max)} (${topicPct}%, ${Number(stats.attempted || 0)}Q, ${topicLevel})`,
+                max: Number(stats.max || 0)
+            };
+        })
+        .sort((a, b) => b.max - a.max)
+        .slice(0, 5)
+        .map((entry) => entry.text)
+        .join("; ");
+    const descriptiveSkill = buildDescriptiveSkillAnalytics(rows);
+    const skillSignalLine = descriptiveSkill.skills.length
+        ? descriptiveSkill.skills
+            .slice(0, 5)
+            .map((skill) => `${skill.skill} ${fmt(skill.scored, skill.max)} (${skill.pct}%, ${skill.level})`)
+            .join("; ")
+        : "Insufficient descriptive-topic evidence to infer internal skill strengths/weaknesses.";
+    const internalStrongLine = descriptiveSkill.strongSkills.length
+        ? descriptiveSkill.strongSkills.join("; ")
+        : strengthsLine;
+    const internalLaborLine = descriptiveSkill.weakSkills.length
+        ? descriptiveSkill.weakSkills.join("; ")
+        : weaknessLine;
+    const suggestionPriority = hardCodingWeak
+        ? "Prioritize hard-level coding with 1 timed problem daily plus edge-case dry runs."
+        : technicalPctValue < 55
+            ? "Prioritize technical concept clarity: revise one topic and write one structured explanation daily."
+            : "Prioritize consistency: maintain accuracy with mixed-difficulty timed sets.";
+    const suggestionPractice = aptitudePct < 60
+        ? "Practice aptitude in 25-minute timed blocks focused on speed + error logging."
+        : "Practice coding testcase validation before final submission to avoid avoidable misses.";
+    const finalReview = majorWeaknesses.length
+        ? `Current focus should remain on labor topics: ${majorWeaknesses.slice(0, 2).join("; ")}.`
+        : "Current performance is stable; maintain momentum with regular timed practice and clarity-first explanations.";
+    const styledSuggestionLine =
+        `[Priority] ${suggestionPriority} | [Practice] ${suggestionPractice} | [Review] ${finalReview}`;
 
     return normalizeSummaryText([
         `Performance Summary of ${student?.name || "this student"} (${student?.course || "Walk-In"})`,
         `1. Aptitude: ${fmt(sectionStats.Aptitude.scored, sectionStats.Aptitude.max)} (${pct(sectionStats.Aptitude.scored, sectionStats.Aptitude.max)}).`,
         `2. Technical: ${fmt(sectionStats.Technical.scored, sectionStats.Technical.max)} (${pct(sectionStats.Technical.scored, sectionStats.Technical.max)}).`,
         `3. Coding: Easy ${fmt(codingByDifficulty.easy.scored, codingByDifficulty.easy.max)}, Medium ${fmt(codingByDifficulty.medium.scored, codingByDifficulty.medium.max)}, Hard ${fmt(codingByDifficulty.hard.scored, codingByDifficulty.hard.max)}; testcase trend E/M/H = ${codingByDifficulty.easy.passed}/${codingByDifficulty.easy.total}, ${codingByDifficulty.medium.passed}/${codingByDifficulty.medium.total}, ${codingByDifficulty.hard.passed}/${codingByDifficulty.hard.total}.`,
-        `4. Major Weaknesses: ${weaknessLine}. Primary area to work hardest on: ${primaryWeakArea}.`,
-        `5. Good Areas: ${strengthsLine}`,
-        `6. Grammar/Spelling Check: ${grammarNote}`,
-        `7. Suggestions: ${suggestionLine} ${actionPlanLine}`,
-        `8. ${overview}`
+        `4. Strengths: ${internalStrongLine}.`,
+        `5. Areas for Improvement: ${internalLaborLine}.`,
+        `6. Communication and Writing Skills: ${grammarNote}`,
+        `7. Topic-wise Stats: ${topicStatsLine || "Topic-wise marks unavailable for this attempt."} Skill signals: ${skillSignalLine}.`,
+        `8. Overall Advisor Note: ${styledSuggestionLine}`
     ].join("\n"));
 }
 
@@ -620,7 +846,10 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         full_marks: Number(row.full_marks || 0),
         coding_difficulty: row.coding_difficulty || "",
         testcases_passed: Number(row.testcases_passed || 0),
-        total_testcases: Number(row.total_testcases || 0)
+        total_testcases: Number(row.total_testcases || 0),
+        question_text: String(row.question_text || ""),
+        descriptive_answer: String(row.descriptive_answer || ""),
+        reference_answer: String(row.reference_answer || "")
     }));
     const analytics = buildWalkinSummaryAnalytics(rows);
 
@@ -635,11 +864,14 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         "Point 1: Aptitude score only (marks and percentage only; no explanation).",
         "Point 2: Technical score only (marks and percentage only; no explanation).",
         "Point 3: Coding score only (easy/medium/hard marks + testcases passed/total only; no explanation).",
-        "Point 4: Major weaknesses (where student must labor hard; if hard coding is weak, state it clearly).",
-        "Point 5: Good areas/strengths (max 2 short points only).",
-        "Point 6: Grammar/spelling/clarity check for technical descriptive responses.",
-        "Point 7: Actionable suggestions + short weekly action plan with time split.",
-        "Point 8: Overall advisor note, clearly stating promotion blockers and next milestone.",
+        "Point 4 heading must be exactly: Strengths. Content: internal topics the student is good at with evidence.",
+        "Point 5 heading must be exactly: Areas for Improvement. Content: internal topics requiring labor with evidence.",
+        "Point 6 heading must be exactly: Communication and Writing Skills. Content: grammar/spelling/clarity for descriptive answers.",
+        "Point 7 heading must be exactly: Topic-wise Stats. Content: numeric stats plus inferred internal skills with marks %, attempt count, and Strong/Moderate/Weak label.",
+        "Point 8 heading must be exactly: Overall Advisor Note. Content: styled suggestions using tags like [Priority], [Practice], [Review].",
+        "Never use the phrases 'Promotion blocked' or 'Next milestone'.",
+        "Keep the summary technical, metric-heavy, and evidence-led.",
+        "Infer internal skills from question_text + reference_answer + student descriptive_answer.",
         "Always restart numbering from 1.",
         "Output plain text only.",
         `Student: ${student?.name || "Unknown"} | Stream: ${student?.course || "Unknown"}`,

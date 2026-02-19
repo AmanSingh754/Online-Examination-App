@@ -162,15 +162,72 @@ body.dashboard {
 .dashboard-layout {
     display: grid;
     grid-template-columns: 260px 1fr;
-    min-height: calc(100vh - 88px);
+    flex: 1 1 auto;
+    min-height: 0;
     width: 100%;
     overflow-x: hidden;
 }
 
 .dashboard-main {
-    padding: 32px 28px 96px;
-    min-height: calc(100vh - 120px);
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    padding: 32px 28px 500px;
+    min-height: 0;
     overflow-x: hidden;
+}
+
+.dashboard-footer-pro {
+    width: 100%;
+    padding: 12px 20px 8px;
+    background:
+        radial-gradient(900px 180px at 12% 0%, rgba(71, 85, 205, 0.18), transparent 60%),
+        radial-gradient(800px 180px at 88% 0%, rgba(34, 197, 94, 0.12), transparent 62%),
+        linear-gradient(180deg, #111938 0%, #0a1230 56%, #060d23 100%);
+    border-top: 1px solid rgba(96, 124, 196, 0.34);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.08),
+        0 -14px 28px rgba(3, 8, 24, 0.42);
+    color: #dbe7ff;
+    box-sizing: border-box;
+}
+
+.dashboard-footer-logo-row {
+    background: linear-gradient(180deg, rgba(15, 27, 76, 0.68), rgba(12, 22, 58, 0.72));
+    border: 1px solid rgba(112, 144, 226, 0.3);
+    border-radius: 12px;
+    padding: 6px 10px;
+    margin: 0 auto 8px;
+    max-width: 1460px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.dashboard-footer-logo {
+    width: 100%;
+    max-width: 1320px;
+    max-height: 96px;
+    height: auto;
+    display: block;
+    margin: 0 auto;
+    object-fit: contain;
+}
+
+.dashboard-footer-divider {
+    height: 1px;
+    background: linear-gradient(
+        90deg,
+        rgba(96, 124, 196, 0),
+        rgba(96, 124, 196, 0.92),
+        rgba(96, 124, 196, 0)
+    );
+}
+
+.dashboard-footer-copy {
+    margin: 8px 0 0;
+    text-align: center;
+    color: #d4e0ff;
+    font-size: 12px;
+    letter-spacing: 0.02em;
 }
 
 /* ================= SIDEBAR ================= */
@@ -369,6 +426,7 @@ body.dashboard {
 /* ================= CONTAINER ================= */
 
 .dashboard-container {
+    flex: 1 1 auto;
     max-width: 1000px;
     margin: 24px 0 80px;
     padding: 0;
@@ -626,6 +684,16 @@ body.dashboard {
 
     .dashboard-main {
         padding: 22px;
+    }
+
+    .dashboard-footer-pro {
+        padding: 10px 14px 8px;
+    }
+
+    .dashboard-footer-logo-row {
+        border-radius: 10px;
+        padding: 6px 8px;
+        margin-bottom: 7px;
     }
 }
 
