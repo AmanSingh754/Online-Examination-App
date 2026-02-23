@@ -114,6 +114,72 @@ const parseCodingLevelName = (value) => {
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 };
 
+const CODING_LEVEL_ORDER = ["Easy", "Medium", "Hard"];
+
+const getCodingLevelKey = (value) => {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized.includes("easy")) return "Easy";
+  if (normalized.includes("medium") || normalized.includes("intermediate")) return "Medium";
+  if (normalized.includes("hard") || normalized.includes("advanced")) return "Hard";
+  return "";
+};
+
+const normalizeCodingLevels = (codingSummary) => {
+  const source = Array.isArray(codingSummary?.levels) ? codingSummary.levels : [];
+  const byLevel = new Map();
+  source.forEach((entry) => {
+    const key = getCodingLevelKey(entry?.name);
+    if (key) byLevel.set(key, entry);
+  });
+  return CODING_LEVEL_ORDER.map((levelName) => {
+    const found = byLevel.get(levelName);
+    if (found) return { ...found, name: levelName };
+    return { name: levelName, scored: 0, total: 0, percent: 0, passed: 0, tcTotal: 0, tcPercent: 0 };
+  });
+};
+
+const splitNarrativePoints = (body = "") => {
+  const compact = String(body || "").replace(/\s+/g, " ").trim();
+  if (!compact) return [];
+  const segments = compact
+    .split(/\s*\|\s*/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  return segments.flatMap((segment) =>
+    segment
+      .split(/;\s+|\. (?=[A-Z0-9\[])/)
+      .map((chunk) => chunk.trim())
+      .filter(Boolean)
+  );
+};
+
+const formatNarrativePoint = (label = "", point = "") => {
+  const section = String(label || "").trim().toLowerCase();
+  const text = String(point || "").trim().replace(/\.+$/, "");
+  if (!text) return "";
+
+  if (section === "areas for improvement") {
+    const match = text.match(/^([a-z0-9.+#\-\s]+)\((\d+)%\s*,\s*(\d+)q\)$/i);
+    if (match) {
+      const topic = match[1].trim();
+      const percent = Number(match[2]);
+      const attempted = Number(match[3]);
+      return `${topic}: ${percent}% across ${attempted} question(s). Strengthen fundamentals and add timed implementation practice with edge-case checks.`;
+    }
+  }
+
+  if (section === "overall advisor note") {
+    const tagged = text.match(/^\[([^\]]+)\]\s*(.+)$/);
+    if (tagged) {
+      const tag = tagged[1].trim();
+      const rest = tagged[2].trim();
+      return `${tag}: ${rest}`;
+    }
+  }
+
+  return text;
+};
+
 const parseCodingSummaryFromTopicStats = (lines) => {
   const codingLines = lines.filter((entry) => /^coding[-\s_]/i.test(entry));
   if (codingLines.length === 0) return null;
@@ -194,6 +260,23 @@ const buildCodingSummaryFromAnswers = (answers) => {
 };
 
 const WALKIN_COURSE_KEYS = new Set(["DS", "DATASCIENCE", "DA", "DATAANALYTICS", "MERN", "FULLSTACK"]);
+const isDataAnalyticsStream = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  return normalized === "DA" || normalized === "DATAANALYTICS";
+};
+const getWalkinStreamLabel = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "");
+  if (normalized === "DS" || normalized.includes("DATASCIENCE")) return "Data Science";
+  if (normalized === "DA" || normalized.includes("DATAANALYTICS")) return "Data Analytics";
+  if (normalized === "MERN" || normalized.includes("FULLSTACK")) return "MERN";
+  return "";
+};
 const isWalkinStudentRow = (student) => {
   const typeNormalized = String(student?.student_type || "")
     .trim()
@@ -233,6 +316,8 @@ function AdminDashboard() {
   const [studentCount, setStudentCount] = useState(0);
   const [totalExamCount, setTotalExamCount] = useState(0);
   const [totalActiveExamCount, setTotalActiveExamCount] = useState(0);
+  const [regularResultedCount, setRegularResultedCount] = useState(0);
+  const [walkinResultedCount, setWalkinResultedCount] = useState(0);
   const [recentResults, setRecentResults] = useState([]);
   const [students, setStudents] = useState([]);
   const [showProfile, setShowProfile] = useState(false);
@@ -586,31 +671,45 @@ function AdminDashboard() {
       setStudentCount(Number(data.studentCount || 0));
       setTotalExamCount(Number(data.totalExamCount || 0));
       setTotalActiveExamCount(Number(data.totalActiveExamCount || 0));
+      setRegularResultedCount(Number(data.regularResultedCount || 0));
+      setWalkinResultedCount(Number(data.walkinResultedCount || 0));
       setRecentResults(Array.isArray(data.recentResults) ? data.recentResults : []);
     } catch (err) {
       console.error("Load dashboard stats error:", err);
       try {
-        const [studentsResp, examsResp, activeResp, resultsResp] = await Promise.all([
+        const [studentsResp, examsResp, activeResp, resultsResp, walkinResultsResp] = await Promise.all([
           fetch(`/admin/students/count/${collegeId}`),
           fetch(`/admin/exams/count/${collegeId}`),
           fetch(`/admin/exams/active-count/${collegeId}`),
-          fetch(`/admin/results/ALL`)
+          fetch(`/admin/results/ALL`),
+          fetch(`/admin/walkin/final-results/ALL?t=${Date.now()}`, { cache: "no-store" })
         ]);
 
         const studentsData = await studentsResp.json();
         const examsData = await examsResp.json();
         const activeData = await activeResp.json();
         const resultsData = await resultsResp.json();
+        const walkinData = await walkinResultsResp.json();
+        const regularStudentIds = new Set(
+          (Array.isArray(resultsData) ? resultsData : []).map((row) => String(row.student_id || "")).filter(Boolean)
+        );
+        const walkinStudentIds = new Set(
+          (Array.isArray(walkinData) ? walkinData : []).map((row) => String(row.student_id || "")).filter(Boolean)
+        );
 
         setStudentCount(Number(studentsData.total || 0));
         setTotalExamCount(Number(examsData.total || 0));
         setTotalActiveExamCount(Number(activeData.total || 0));
+        setRegularResultedCount(regularStudentIds.size);
+        setWalkinResultedCount(walkinStudentIds.size);
         setRecentResults(Array.isArray(resultsData) ? resultsData : []);
       } catch (fallbackError) {
         console.error("Load dashboard fallback error:", fallbackError);
         setStudentCount(0);
         setTotalExamCount(0);
         setTotalActiveExamCount(0);
+        setRegularResultedCount(0);
+        setWalkinResultedCount(0);
         setRecentResults([]);
       }
     }
@@ -1093,6 +1192,39 @@ function AdminDashboard() {
   const isDashboardView = !showProfile && activeSection === "dashboard";
   const walkinStudents = students.filter((student) => isWalkinStudentRow(student));
   const regularStudents = students.filter((student) => !isWalkinStudentRow(student));
+  const regularStudentCount = regularStudents.length;
+  const walkinStudentCount = walkinStudents.length;
+  const regularStudentsPercent = toPercent(regularStudentCount, studentCount || 1);
+  const walkinStudentsPercent = toPercent(walkinStudentCount, studentCount || 1);
+  const resultedStudentCount = regularResultedCount + walkinResultedCount;
+  const regularResultedPercent = toPercent(regularResultedCount, regularStudentCount || 1);
+  const walkinResultedPercent = toPercent(walkinResultedCount, walkinStudentCount || 1);
+  const readyWalkinStreams = WALKIN_STREAMS;
+  const walkinStreamCount = WALKIN_STREAMS.length;
+  const walkinStreamsReadyPercent = toPercent(readyWalkinStreams.length, walkinStreamCount || 1);
+  const walkinStreamProgressRows = WALKIN_STREAMS.map((stream) => ({
+    stream,
+    ready: readyWalkinStreams.includes(stream)
+  }));
+  const walkinStreamCounts = WALKIN_STREAMS.reduce((acc, stream) => {
+    acc[stream] = 0;
+    return acc;
+  }, {});
+  walkinStudents.forEach((student) => {
+    const streamLabel = getWalkinStreamLabel(student?.course);
+    if (streamLabel && walkinStreamCounts[streamLabel] !== undefined) {
+      walkinStreamCounts[streamLabel] += 1;
+    }
+  });
+  const regularWalkinRows = [
+    { label: "Regular", count: regularStudentCount, tone: "regular" },
+    { label: "Data Science", count: walkinStreamCounts["Data Science"], tone: "data-science" },
+    { label: "Data Analytics", count: walkinStreamCounts["Data Analytics"], tone: "data-analytics" },
+    { label: "MERN", count: walkinStreamCounts.MERN, tone: "mern" }
+  ].map((entry) => ({
+    ...entry,
+    percent: toPercent(entry.count, studentCount || 1)
+  }));
   const reviewAnswers = walkinReviewData?.answers || [];
   const reviewSummary = String(walkinReviewData?.performance_summary || "")
     .replace(/Main weak area:[^.]*\.?/gi, "")
@@ -1125,6 +1257,8 @@ function AdminDashboard() {
     parseCodingSummary(reviewSummaryBodyLines) ||
     buildCodingSummaryFromAnswers(reviewAnswers) ||
     parseCodingSummaryFromTopicStats(reviewSummaryBodyLines);
+  const hideCodingSummaryCardsForStudent = isDataAnalyticsStream(walkinReviewData?.student?.course);
+  const displayedCodingSummary = hideCodingSummaryCardsForStudent ? null : codingSummary;
   const reviewNarrativeLines = reviewSummaryBodyLines
     .filter((line) => !/^\d+\.\s*(Aptitude|Technical|Coding)\s*:/i.test(line))
     .map((line) => line.replace(/^\d+\.\s*/, "").trim())
@@ -1134,16 +1268,15 @@ function AdminDashboard() {
     const hasLabel = separatorIndex > 0;
     const label = hasLabel ? line.slice(0, separatorIndex).trim() : "Topic";
     const body = hasLabel ? line.slice(separatorIndex + 1).trim() : line;
-    const pointChunks = body
-      .replace(/\s+/g, " ")
-      .split(/;\s+|\. (?=[A-Z0-9])/)
-      .map((chunk) => chunk.trim())
+    const pointChunks = splitNarrativePoints(body)
+      .map((chunk) => formatNarrativePoint(label, chunk))
       .filter(Boolean);
     return {
       label,
       points: pointChunks.length ? pointChunks : [body]
     };
   });
+  const codingLevelCards = normalizeCodingLevels(displayedCodingSummary);
   const walkinResultsRows = useMemo(() => {
     const source = Array.isArray(walkinResults) ? walkinResults : [];
     const query = walkinResultsSearch.trim().toLowerCase();
@@ -1404,25 +1537,30 @@ function AdminDashboard() {
                 <h2>Analytics</h2>
                 <div className="analytics-layout">
                   <div className="stat-grid">
-                    <div className="stat-card">
+                    <div className="stat-card stat-card-neutral">
                       <span className="stat-label">Total Students</span>
                       <span className="stat-value">{studentCount}</span>
                       <span className="stat-meta">Registered learners</span>
                     </div>
-                    <div className="stat-card">
-                      <span className="stat-label">Walk-In Students</span>
-                      <span className="stat-value">{walkinStudents.length}</span>
-                      <span className="stat-meta">Walk-in profiles</span>
+                    <div className="stat-card stat-card-regular">
+                      <span className="stat-label">Regular Exam Students</span>
+                      <span className="stat-value">{regularStudentCount}</span>
+                      <span className="stat-meta">{regularStudentsPercent.toFixed(0)}% of total students</span>
                     </div>
-                    <div className="stat-card">
-                      <span className="stat-label">Active Exams</span>
-                      <span className="stat-value">{activeExams}</span>
-                      <span className="stat-meta">Ready to attempt</span>
+                    <div className="stat-card stat-card-walkin">
+                      <span className="stat-label">Walk-In Exam Students</span>
+                      <span className="stat-value">{walkinStudentCount}</span>
+                      <span className="stat-meta">{walkinStudentsPercent.toFixed(0)}% of total students</span>
                     </div>
-                    <div className="stat-card">
-                      <span className="stat-label">Total Exams</span>
-                      <span className="stat-value">{totalExamCount}</span>
-                      <span className="stat-meta">Across all courses/streams</span>
+                    <div className="stat-card stat-card-regular-result">
+                      <span className="stat-label">Regular Resulted Students</span>
+                      <span className="stat-value">{regularResultedCount}</span>
+                      <span className="stat-meta">{regularResultedPercent.toFixed(0)}% of regular students</span>
+                    </div>
+                    <div className="stat-card stat-card-walkin-result">
+                      <span className="stat-label">Walk-In Resulted Students</span>
+                      <span className="stat-value">{walkinResultedCount}</span>
+                      <span className="stat-meta">{walkinResultedPercent.toFixed(0)}% of walk-in students</span>
                     </div>
                   </div>
                   <div className="chart-stack">
@@ -1432,19 +1570,18 @@ function AdminDashboard() {
                         <span>{studentCount} total</span>
                       </div>
                       <div className="chart-canvas chart-canvas-compact">
-                        <div className="donut-wrap">
-                          <div
-                            className="donut-chart"
-                            style={{ "--donut-percent": `${toPercent(regularStudents.length, studentCount || 1)}%` }}
-                          >
-                            <div className="donut-center">
-                              <p className="donut-value">{regularStudents.length}</p>
-                              <p className="donut-label">Regular</p>
+                        <div className="regular-walkin-bars">
+                          {regularWalkinRows.map((entry) => (
+                            <div className={`regular-walkin-row tone-${entry.tone}`} key={`rw-row-${entry.label}`}>
+                              <div className="regular-walkin-row-head">
+                                <span>{entry.label}</span>
+                                <span>{entry.count} ({entry.percent.toFixed(0)}%)</span>
+                              </div>
+                              <div className="regular-walkin-row-track">
+                                <div className="regular-walkin-row-fill" style={{ width: `${entry.percent}%` }} />
+                              </div>
                             </div>
-                          </div>
-                          <p className="donut-meta">
-                            {walkinStudents.length} walk-in ({toPercent(walkinStudents.length, studentCount || 1).toFixed(0)}%)
-                          </p>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -1452,16 +1589,29 @@ function AdminDashboard() {
                       <div className="chart-card">
                         <div className="chart-header">
                           <h3>Active Exams (Ready)</h3>
-                          <span>{activeExams} total</span>
+                          <span>{readyWalkinStreams.length} walk-in streams ready</span>
                         </div>
                         <div className="chart-canvas chart-canvas-compact">
                           <div className="progress-wrap">
                             <div className="progress-track">
-                              <div className="progress-fill progress-fill-exams" style={{ width: `${activeExamsPercent}%` }} />
+                              <div className="progress-fill progress-fill-exams" style={{ width: `${walkinStreamsReadyPercent}%` }} />
                             </div>
-                            <p className="progress-label">
-                              {activeExams} of {totalExamCount} exams ready ({activeExamsPercent.toFixed(0)}%)
-                            </p>
+                            <div className="exam-ready-bars">
+                              {walkinStreamProgressRows.map((entry) => (
+                                <div className="exam-ready-row" key={`ready-stream-${entry.stream}`}>
+                                  <div className="exam-ready-row-head">
+                                    <span>{entry.stream}</span>
+                                    <span>{entry.ready ? "Ready" : "Not Ready"}</span>
+                                  </div>
+                                  <div className="exam-ready-row-track">
+                                    <div
+                                      className={`exam-ready-row-fill ${entry.ready ? "is-ready" : ""}`}
+                                      style={{ width: entry.ready ? "100%" : "0%" }}
+                                    />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -1472,11 +1622,15 @@ function AdminDashboard() {
                         </div>
                         <div className="chart-canvas chart-canvas-compact">
                           <div className="kpi-wrap">
-                            <p className="kpi-value">{studentCount}</p>
-                            <p className="kpi-label">Total Registered Students</p>
+                            <p className="kpi-value">{regularStudentCount}</p>
+                            <p className="kpi-label">Regular Registered Students</p>
                             <div className="kpi-split">
-                              <span>Regular: {regularStudents.length}</span>
-                              <span>Walk-In: {walkinStudents.length}</span>
+                              <span>Total Registered: {studentCount}</span>
+                              <span>Regular Resulted: {regularResultedCount}</span>
+                            </div>
+                            <div className="kpi-split">
+                              <span>Result Coverage: {regularResultedPercent.toFixed(0)}%</span>
+                              <span>Pending Results: {Math.max(regularStudentCount - regularResultedCount, 0)}</span>
                             </div>
                           </div>
                         </div>
@@ -1558,7 +1712,9 @@ function AdminDashboard() {
                         </tr>
                       </thead>
                       <tbody>
-                        {walkinResultsRows.map((row) => (
+                        {walkinResultsRows.map((row) => {
+                          const isDataAnalyticsRow = isDataAnalyticsStream(row.stream);
+                          return (
                           <tr key={`${row.student_id}-${row.exam_id}`}>
                             <td>{row.student_id}</td>
                             <td>{row.name || "--"}</td>
@@ -1566,9 +1722,9 @@ function AdminDashboard() {
                             <td>{row.exam_id}</td>
                             <td>{Number(row.aptitude_marks || 0).toFixed(2)}</td>
                             <td>{Number(row.technical_marks || 0).toFixed(2)}</td>
-                            <td>{Number(row.coding_easy_marks || 0).toFixed(2)}</td>
-                            <td>{Number(row.coding_medium_marks || 0).toFixed(2)}</td>
-                            <td>{Number(row.coding_hard_marks || 0).toFixed(2)}</td>
+                            <td>{isDataAnalyticsRow ? "NA" : Number(row.coding_easy_marks || 0).toFixed(2)}</td>
+                            <td>{isDataAnalyticsRow ? "NA" : Number(row.coding_medium_marks || 0).toFixed(2)}</td>
+                            <td>{isDataAnalyticsRow ? "NA" : Number(row.coding_hard_marks || 0).toFixed(2)}</td>
                             <td>{Number(row.total_marks || 0).toFixed(2)}</td>
                             <td>
                               <button
@@ -1581,7 +1737,8 @@ function AdminDashboard() {
                               </button>
                             </td>
                           </tr>
-                        ))}
+                        );
+                        })}
                       </tbody>
                     </table>
                     </div>
@@ -1628,7 +1785,7 @@ function AdminDashboard() {
                       {walkinReviewView === "summary" && reviewSummary && (
                         <div className="walkin-review-card walkin-review-summary">
                           <p className="item-meta summary-title">{reviewSummaryTitle}</p>
-                          {(aptitudeSummary || technicalSummary || codingSummary) && (
+                          {(aptitudeSummary || technicalSummary || displayedCodingSummary) && (
                             <div className="summary-score-grid">
                               {aptitudeSummary && (
                                 <div className="summary-score-card summary-score-card-aptitude">
@@ -1664,34 +1821,28 @@ function AdminDashboard() {
                                   </p>
                                 </div>
                               )}
-                              {codingSummary && (
-                                <div className="summary-score-card summary-score-card-coding">
-                                  <p className="summary-score-label">Coding</p>
-                                  <div className="summary-coding-header">
-                                    <p className="summary-coding-total">
-                                      {codingSummary.scored.toFixed(2)} / {codingSummary.total.toFixed(2)}
-                                    </p>
-                                    <p className="summary-coding-total-percent">{Math.round(codingSummary.percent)}%</p>
-                                  </div>
-                                  <div className="summary-coding-levels">
-                                    {codingSummary.levels.map((level) => (
-                                      <div className="summary-coding-level" key={`coding-level-${level.name}`}>
-                                        <p className="summary-coding-level-name">{level.name}</p>
-                                        <div
-                                          className="summary-mini-donut"
-                                          style={{ "--summary-percent": `${level.tcPercent}%` }}
-                                        >
-                                          <span>{Math.round(level.tcPercent)}%</span>
+                              {displayedCodingSummary && (
+                                <div className="summary-coding-level-grid">
+                                  {codingLevelCards.map((level) => (
+                                    <div className="summary-score-card summary-score-card-coding-level" key={`coding-level-${level.name}`}>
+                                      <p className="summary-score-label">Coding {level.name}</p>
+                                      <div
+                                        className="summary-donut summary-donut-coding"
+                                        style={{ "--summary-percent": `${level.percent}%` }}
+                                      >
+                                        <div className="summary-donut-center">
+                                          <p className="summary-donut-value">{Math.round(level.percent)}%</p>
+                                          <p className="summary-donut-sub">score</p>
                                         </div>
-                                        <p className="summary-coding-level-marks">
-                                          {level.scored.toFixed(2)} / {level.total.toFixed(2)}
-                                        </p>
-                                        <p className="summary-coding-level-tc">
-                                          TC {level.passed}/{level.tcTotal}
-                                        </p>
                                       </div>
-                                    ))}
-                                  </div>
+                                      <p className="summary-score-marks">
+                                        {level.scored.toFixed(2)} / {level.total.toFixed(2)}
+                                      </p>
+                                      <p className="summary-coding-level-tc">
+                                        TC {level.passed}/{level.tcTotal} ({Math.round(level.tcPercent)}%)
+                                      </p>
+                                    </div>
+                                  ))}
                                 </div>
                               )}
                             </div>

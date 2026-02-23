@@ -93,7 +93,7 @@ function StudentLogin() {
       <main className="auth-main">
         <section className="auth-copy">
           <p className="hero-eyebrow">Student Access</p>
-          <h1>Log in to your Examination Dasboard</h1>
+          <h1>Log in to your Examination Dashboard</h1>
           <div className="auth-highlight">
             <div>
               <span className="metric-value">One Login</span>

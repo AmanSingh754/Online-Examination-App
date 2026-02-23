@@ -1156,7 +1156,7 @@ router.get("/walkin/final-results/:collegeId", async (req, res) => {
 
 router.get("/dashboard-stats", async (req, res) => {
     try {
-        const [eventsRows, studentRows, examRows, activeExamRows, resultRows] = await Promise.all([
+        const [eventsRows, studentRows, examRows, activeExamRows, resultRows, regularResultedRows, walkinResultedRows] = await Promise.all([
             Promise.resolve([]),
             queryAsync(
                 `SELECT COUNT(*) AS total FROM students`
@@ -1203,6 +1203,22 @@ router.get("/dashboard-stats", async (req, res) => {
                 ORDER BY r.result_id DESC
                 LIMIT 20
                 `
+            ),
+            queryAsync(
+                `
+                SELECT COUNT(DISTINCT r.student_id) AS total
+                FROM results r
+                JOIN students s ON s.student_id = r.student_id
+                WHERE UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) NOT IN ('WALK_IN', 'WALKIN')
+                `
+            ),
+            queryAsync(
+                `
+                SELECT COUNT(DISTINCT wfr.student_id) AS total
+                FROM walkin_final_results wfr
+                JOIN students s ON s.student_id = wfr.student_id
+                WHERE UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN')
+                `
             )
         ]);
 
@@ -1212,6 +1228,8 @@ router.get("/dashboard-stats", async (req, res) => {
             studentCount: Number(studentRows?.[0]?.total || 0),
             totalExamCount: Number(examRows?.[0]?.total || 0),
             totalActiveExamCount: Number(activeExamRows?.[0]?.total || 0),
+            regularResultedCount: Number(regularResultedRows?.[0]?.total || 0),
+            walkinResultedCount: Number(walkinResultedRows?.[0]?.total || 0),
             recentResults: resultRows || []
         });
     } catch (error) {

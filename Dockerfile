@@ -15,6 +15,7 @@ RUN npm ci --omit=dev
 FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apk add --no-cache python3 g++ && ln -sf /usr/bin/python3 /usr/bin/python
 
 COPY --from=backend-deps /app/Backend/node_modules ./Backend/node_modules
 COPY Backend ./Backend

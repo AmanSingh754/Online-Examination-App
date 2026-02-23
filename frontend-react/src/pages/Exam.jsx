@@ -884,7 +884,7 @@ export default function Exam() {
           setSubmitMessage(
             forceSubmit
               ? "Exam auto-submitted after 3 fullscreen/focus violations."
-              : "Exam submitted successfully. Please wait for results. Thank you."
+              : "Exam submitted successfully. Thank you."
           );
           setTimeout(() => {
             navigate("/student/dashboard");
@@ -898,6 +898,9 @@ export default function Exam() {
         setSubmitSuccess(false);
         setSubmitMessage(err.message || "Submission failed. Please try again.");
       } finally {
+        if (forceSubmit && !submitCompleted) {
+          autoSubmitTriggeredRef.current = false;
+        }
         setIsSubmitting(false);
         setSubmitConfirmOpen(false);
       }
@@ -942,6 +945,27 @@ export default function Exam() {
     },
     [isSubmitting, preExamOpen, submitSuccess]
   );
+
+  useEffect(() => {
+    if (preExamOpen || submitSuccess || isSubmitting) return;
+    if (violations < VIOLATION_LIMIT) return;
+    if (autoSubmitTriggeredRef.current) return;
+
+    autoSubmitTriggeredRef.current = true;
+    setViolationWarning((prev) => ({ ...prev, open: false }));
+    setSubmitConfirmOpen(false);
+    setSecurityNotice("");
+
+    const submitNow = async () => {
+      try {
+        await handleConfirmSubmit({ force: true });
+      } catch (_) {
+        autoSubmitTriggeredRef.current = false;
+      }
+    };
+
+    submitNow();
+  }, [handleConfirmSubmit, isSubmitting, preExamOpen, submitSuccess, violations]);
 
   const handleViolationGoFullscreen = useCallback(() => {
     enterFullscreen();
@@ -1450,12 +1474,18 @@ export default function Exam() {
           </div>
         </div>
       )}
-      {submitMessage && (
+      {(isSubmitting || submitMessage) && (
         <div className="submit-feedback-overlay" role="alertdialog" aria-modal="true" aria-labelledby="submit-feedback-title">
-          <div className={`submit-feedback-panel ${submitSuccess ? "success" : "error"}`}>
-            <h3 id="submit-feedback-title">{submitSuccess ? "Exam Submitted Successfully" : "Submission Failed"}</h3>
-            <p>{submitMessage}</p>
-            {!submitSuccess && (
+          <div className={`submit-feedback-panel ${isSubmitting ? "success" : submitSuccess ? "success" : "error"}`}>
+            <h3 id="submit-feedback-title">
+              {isSubmitting ? "Exam Submitting" : submitSuccess ? "Exam Submitted Successfully" : "Submission Failed"}
+            </h3>
+            <p>
+              {isSubmitting
+                ? "Exam is submitting. Please wait patiently."
+                : submitMessage}
+            </p>
+            {!isSubmitting && !submitSuccess && (
               <button
                 type="button"
                 className="nav-btn"

@@ -31,6 +31,22 @@ const reactDist = path.join(__dirname, "../frontend-react/dist");
 const legacyFrontend = path.join(__dirname, "../Frontend");
 const hasReactBuild = fs.existsSync(reactDist);
 
+const readServedBuildAssets = () => {
+    try {
+        const indexPath = path.join(reactDist, "index.html");
+        if (!fs.existsSync(indexPath)) return { js: "n/a", css: "n/a" };
+        const html = fs.readFileSync(indexPath, "utf8");
+        const jsMatch = html.match(/\/assets\/(index-[^"']+\.js)/i);
+        const cssMatch = html.match(/\/assets\/(index-[^"']+\.css)/i);
+        return {
+            js: jsMatch?.[1] || "n/a",
+            css: cssMatch?.[1] || "n/a"
+        };
+    } catch {
+        return { js: "n/a", css: "n/a" };
+    }
+};
+
 app.use(express.json());
 app.use(
     session({
@@ -56,6 +72,10 @@ if (hasReactBuild) {
 }
 
 const sendIndex = (res) => {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+
     if (hasReactBuild) {
         return res.sendFile(path.join(reactDist, "index.html"));
     }
@@ -156,5 +176,11 @@ if (hasReactBuild) {
 
 const port = Number(process.env.PORT || 5000);
 app.listen(port, () => {
+    if (hasReactBuild) {
+        const assets = readServedBuildAssets();
+        console.log(`Serving React build: JS=${assets.js}, CSS=${assets.css}`);
+    } else {
+        console.log("Serving legacy frontend (React dist not found)");
+    }
     console.log(`Server running at http://localhost:${port}`);
 });

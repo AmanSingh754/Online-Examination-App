@@ -147,6 +147,10 @@ const db = {
     }
 };
 
+pool.on("error", (err) => {
+    console.error("PostgreSQL pool idle client error:", withConnectionHint(err));
+});
+
 pool
     .query("SELECT NOW() AS connected_at")
     .then(() => {

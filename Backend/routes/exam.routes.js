@@ -119,6 +119,18 @@ const ensurePathHas = (envPath, folder) => {
     return [folder, ...parts].join(delimiter);
 };
 
+const getRuntimeCommandCandidates = (language, primaryCommand) => {
+    const normalizedPrimary = String(primaryCommand || "").trim();
+    if (language !== "python") {
+        return normalizedPrimary ? [normalizedPrimary] : [];
+    }
+    const envPreferred = String(process.env.PYTHON_CMD || "").trim();
+    const candidates = [envPreferred, normalizedPrimary, "python3", "python", "py"]
+        .map((value) => String(value || "").trim())
+        .filter(Boolean);
+    return [...new Set(candidates)];
+};
+
 const spawnProcess = async (command, args, options) => {
     return await new Promise((resolve, reject) => {
         const child = spawn(command, args, options);
@@ -230,58 +242,74 @@ const runCodeWithRunner = async (language, code, input = "") => {
 
     const execArgs = fillArgs(runner.exec.args, ctx);
     const execCommand = runner.exec.command.replace(/\{\{exe\}\}/g, ctx.exe);
+    const runtimeCandidates = getRuntimeCommandCandidates(language, execCommand);
     return await new Promise((resolve, reject) => {
-        const child = spawn(execCommand, execArgs, {
-            cwd: TEMP_CODE_DIR,
-            env: runnerEnv,
-            stdio: ["pipe", "pipe", "pipe"]
-        });
-        if (input) {
-            child.stdin.write(input);
-        }
-        child.stdin.end();
-
-        let stdout = "";
-        let stderr = "";
-        let timedOut = false;
-        const timer = setTimeout(() => {
-            timedOut = true;
-            child.kill();
-        }, 5000);
-
-        child.stdout.on("data", (chunk) => {
-            stdout += chunk.toString("utf8");
-        });
-        child.stderr.on("data", (chunk) => {
-            stderr += chunk.toString("utf8");
-        });
-
-        child.on("error", (err) => {
-            clearTimeout(timer);
+        const cleanupTempFiles = () => {
             fs.promises.unlink(filepath).catch(() => {});
             if (runner.exeExt) {
                 fs.promises.unlink(exePath).catch(() => {});
             }
-            if (err.code === "ENOENT") {
-                reject(new Error(`Runtime not found: ${execCommand}`));
-                return;
-            }
-            reject(err);
-        });
+        };
 
-        child.on("close", (code) => {
-            clearTimeout(timer);
-            fs.promises.unlink(filepath).catch(() => {});
-            if (runner.exeExt) {
-                fs.promises.unlink(exePath).catch(() => {});
-            }
-            resolve({
-                stdout: stdout.trim(),
-                stderr: stderr.trim(),
-                timedOut,
-                exitCode: code
+        const trySpawn = (index) => {
+            const commandToRun = runtimeCandidates[index];
+            const child = spawn(commandToRun, execArgs, {
+                cwd: TEMP_CODE_DIR,
+                env: runnerEnv,
+                stdio: ["pipe", "pipe", "pipe"]
             });
-        });
+            if (input) {
+                child.stdin.write(input);
+            }
+            child.stdin.end();
+
+            let stdout = "";
+            let stderr = "";
+            let timedOut = false;
+            const timer = setTimeout(() => {
+                timedOut = true;
+                child.kill();
+            }, 5000);
+
+            child.stdout.on("data", (chunk) => {
+                stdout += chunk.toString("utf8");
+            });
+            child.stderr.on("data", (chunk) => {
+                stderr += chunk.toString("utf8");
+            });
+
+            child.on("error", (err) => {
+                clearTimeout(timer);
+                if (err.code === "ENOENT" && index < runtimeCandidates.length - 1) {
+                    trySpawn(index + 1);
+                    return;
+                }
+                cleanupTempFiles();
+                if (err.code === "ENOENT") {
+                    reject(new Error(`Runtime not found. Tried: ${runtimeCandidates.join(", ")}`));
+                    return;
+                }
+                reject(err);
+            });
+
+            child.on("close", (code) => {
+                clearTimeout(timer);
+                cleanupTempFiles();
+                resolve({
+                    stdout: stdout.trim(),
+                    stderr: stderr.trim(),
+                    timedOut,
+                    exitCode: code
+                });
+            });
+        };
+
+        if (!runtimeCandidates.length) {
+            cleanupTempFiles();
+            reject(new Error("Runtime command is not configured"));
+            return;
+        }
+        trySpawn(0);
     });
 };
 const ALLOWED_CODING_LANGUAGES = new Set(["python", "javascript", "cpp"]);
