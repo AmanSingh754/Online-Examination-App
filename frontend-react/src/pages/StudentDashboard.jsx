@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 
@@ -16,22 +16,14 @@ function StudentDashboard() {
 
   const [availableExams, setAvailableExams] = useState([]);
   const [attemptedExams, setAttemptedExams] = useState([]);
+  const [startingExamId, setStartingExamId] = useState(null);
   const [showProfile, setShowProfile] = useState(false);
   const isWalkinDashboard = [...availableExams, ...attemptedExams].some((exam) =>
     /walk[\s-]*in/i.test(String(exam?.exam_name || ""))
   );
   const courseLabel = isWalkinDashboard ? "Specialization" : "Course";
 
-  useEffect(() => {
-    if (!studentId || !studentName) {
-      navigate("/student/login");
-      return;
-    }
-    loadAvailableExams();
-    loadAttemptedExams();
-  }, [studentId, studentName, navigate]);
-
-  const loadAvailableExams = async () => {
+  const loadAvailableExams = useCallback(async () => {
     try {
       const response = await fetch(`/student/exams/${studentId}`, {
         credentials: "include",
@@ -47,9 +39,9 @@ function StudentDashboard() {
       console.error("Load available exams error:", err);
       setAvailableExams([]);
     }
-  };
+  }, [navigate, studentId]);
 
-  const loadAttemptedExams = async () => {
+  const loadAttemptedExams = useCallback(async () => {
     try {
       const response = await fetch(`/student/attempted-exams/${studentId}`, {
         credentials: "include",
@@ -65,9 +57,23 @@ function StudentDashboard() {
       console.error("Load attempted exams error:", err);
       setAttemptedExams([]);
     }
-  };
+  }, [navigate, studentId]);
+
+  useEffect(() => {
+    if (!studentId || !studentName) {
+      navigate("/student/login");
+      return;
+    }
+    const run = setTimeout(() => {
+      loadAvailableExams();
+      loadAttemptedExams();
+    }, 0);
+    return () => clearTimeout(run);
+  }, [loadAttemptedExams, loadAvailableExams, navigate, studentId, studentName]);
 
   const startExam = async (examId) => {
+    if (startingExamId !== null) return;
+    setStartingExamId(examId);
     try {
       const response = await fetch(`/exam/attempted/${studentId}/${examId}`);
       const data = await response.json();
@@ -83,6 +89,18 @@ function StudentDashboard() {
       });
       const startData = await startResponse.json();
       if (!startResponse.ok || !startData.success) {
+        const startsInSeconds = Number(startData?.startsInSeconds || 0);
+        if (String(startData?.code || "") === "exam_not_started" && startsInSeconds > 0) {
+          const hours = Math.floor(startsInSeconds / 3600);
+          const minutes = Math.floor((startsInSeconds % 3600) / 60);
+          const seconds = startsInSeconds % 60;
+          const parts = [];
+          if (hours > 0) parts.push(`${hours} hr`);
+          if (minutes > 0 || hours > 0) parts.push(`${minutes} min`);
+          parts.push(`${seconds} sec`);
+          alert(`Exam has not started yet. ${parts.join(" ")} left.`);
+          return;
+        }
         alert(startData.message || "Unable to start exam.");
         return;
       }
@@ -93,6 +111,8 @@ function StudentDashboard() {
       navigate(query);
     } catch (err) {
       console.error("Start exam error:", err);
+    } finally {
+      setStartingExamId(null);
     }
   };
 
@@ -194,6 +214,7 @@ function StudentDashboard() {
             >
               Dashboard
             </button>
+            <span className="nav-break" aria-hidden="true" />
 
             {!showProfile && (
               <>
@@ -212,6 +233,7 @@ function StudentDashboard() {
                 >
                   Attempted Exams
                 </button>
+                <span className="nav-break" aria-hidden="true" />
               </>
             )}
 
@@ -223,6 +245,7 @@ function StudentDashboard() {
             >
               Profile
             </button>
+            <span className="nav-break" aria-hidden="true" />
           </nav>
 
           <div className="sidebar-footer">
@@ -290,8 +313,9 @@ function StudentDashboard() {
                           <td>
                             <button
                               onClick={() => startExam(exam.exam_id)}
+                              disabled={startingExamId !== null}
                             >
-                              Start Exam
+                              {startingExamId === exam.exam_id ? "Starting..." : "Start Exam"}
                             </button>
                           </td>
                         </tr>

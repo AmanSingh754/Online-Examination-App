@@ -47,6 +47,8 @@ const rejectUnauthorized =
 const pgConnectTimeoutMs = Number(process.env.PG_CONNECT_TIMEOUT_MS || 5000);
 const pgQueryTimeoutMs = Number(process.env.PG_QUERY_TIMEOUT_MS || 30000);
 const pgKeepAliveDelayMs = Number(process.env.PG_KEEPALIVE_INITIAL_DELAY_MS || 10000);
+const pgRetryOnConnReset =
+    String(process.env.PG_RETRY_ON_CONN_RESET || "true").toLowerCase() !== "false";
 
 if (!pgUser || !pgPassword || !pgDatabase) {
     console.error("PostgreSQL env configuration is incomplete. Set PG_USER, PG_PASSWORD, and PG_DATABASE in Backend/.env");
@@ -82,6 +84,16 @@ const withConnectionHint = (error) => {
     );
     return Object.assign(hinted, error, { code: "ETIMEDOUT" });
 };
+
+const isConnectionResetLikeError = (error) => {
+    const code = String(error?.code || "").toUpperCase();
+    const message = String(error?.message || "");
+    if (code === "ECONNRESET" || code === "EPIPE") return true;
+    if (["08000", "08003", "08006", "57P01", "57P02", "57P03"].includes(code)) return true;
+    return /econnreset|connection terminated unexpectedly|socket hang up|terminating connection/i.test(message);
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const convertMysqlPlaceholdersToPg = (sql) => {
     let idx = 0;
@@ -129,12 +141,23 @@ const db = {
         }
 
         const pgSql = convertMysqlPlaceholdersToPg(sql);
-        const queryPromise = pool
-            .query(pgSql, params)
-            .then((result) => [normalizePgResult(result), []])
-            .catch((err) => {
+        const execute = async (attempt = 0) => {
+            try {
+                const result = await pool.query(pgSql, params);
+                return [normalizePgResult(result), []];
+            } catch (err) {
+                const canRetry =
+                    pgRetryOnConnReset &&
+                    attempt === 0 &&
+                    isConnectionResetLikeError(err);
+                if (canRetry) {
+                    await sleep(80);
+                    return execute(attempt + 1);
+                }
                 throw withConnectionHint(err);
-            });
+            }
+        };
+        const queryPromise = execute(0);
 
         if (typeof cb === "function") {
             queryPromise
@@ -144,11 +167,59 @@ const db = {
         }
 
         return queryPromise;
+    },
+
+    async withTransaction(work) {
+        if (typeof work !== "function") {
+            throw new Error("withTransaction requires a callback");
+        }
+
+        const client = await pool.connect();
+        const txQuery = async (sql, values) => {
+            const params = Array.isArray(values) ? values : [];
+            const pgSql = convertMysqlPlaceholdersToPg(sql);
+            const result = await client.query(pgSql, params);
+            return normalizePgResult(result);
+        };
+
+        try {
+            await client.query("BEGIN");
+            const output = await work(txQuery);
+            await client.query("COMMIT");
+            return output;
+        } catch (error) {
+            try {
+                await client.query("ROLLBACK");
+            } catch (rollbackError) {
+                console.error("PostgreSQL transaction rollback error:", rollbackError?.message || rollbackError);
+            }
+            throw withConnectionHint(error);
+        } finally {
+            client.release();
+        }
+    },
+
+    async healthCheck() {
+        try {
+            await pool.query("SELECT 1");
+            return { ok: true };
+        } catch (error) {
+            const hinted = withConnectionHint(error);
+            return {
+                ok: false,
+                error: String(hinted?.message || hinted)
+            };
+        }
     }
 };
 
 pool.on("error", (err) => {
-    console.error("PostgreSQL pool idle client error:", withConnectionHint(err));
+    const hinted = withConnectionHint(err);
+    if (isConnectionResetLikeError(hinted)) {
+        console.warn("PostgreSQL idle connection reset (pool will reconnect):", hinted?.message || hinted);
+        return;
+    }
+    console.error("PostgreSQL pool idle client error:", hinted);
 });
 
 pool

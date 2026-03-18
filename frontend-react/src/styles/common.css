@@ -135,6 +135,32 @@ body.admin-landing .landing-shell {
         linear-gradient(180deg, #cfd8e3 0%, #c2ccda 45%, #dfe6f2 100%);
 }
 
+body.bde-landing {
+    background:
+        linear-gradient(180deg, rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.14)),
+        radial-gradient(1100px 620px at 8% -12%, rgba(147, 197, 253, 0.2), transparent 68%),
+        radial-gradient(900px 560px at 92% -4%, rgba(167, 139, 250, 0.14), transparent 64%),
+        radial-gradient(820px 420px at 48% 22%, rgba(251, 191, 36, 0.08), transparent 62%),
+        linear-gradient(180deg, #cfd8e6 0%, #c2ccd9 44%, #d4dde8 100%);
+}
+
+body.bde-landing .landing-shell {
+    background:
+        linear-gradient(180deg, rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.08)),
+        radial-gradient(920px 500px at 14% -4%, rgba(191, 219, 254, 0.16), transparent 68%),
+        radial-gradient(760px 420px at 88% 4%, rgba(196, 181, 253, 0.14), transparent 64%),
+        linear-gradient(180deg, rgba(222, 230, 243, 0.8) 0%, rgba(212, 222, 237, 0.76) 46%, rgba(224, 232, 244, 0.78) 100%);
+}
+
+body.bde-landing .auth-card {
+    background: rgba(242, 246, 252, 0.9);
+    box-shadow:
+        0 24px 42px rgba(0, 0, 0, 0.22),
+        0 10px 22px rgba(30, 41, 59, 0.14),
+        inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    border: 1px solid rgba(100, 116, 139, 0.3);
+}
+
 .landing-header {
     display: flex;
     align-items: center;
@@ -534,6 +560,10 @@ body.admin-landing .landing-shell {
     padding-bottom: 0;
 }
 
+.auth-page .landing-footer-pro {
+    margin-top: 44px;
+}
+
 .auth-main {
     display: grid;
     grid-template-columns: 1fr;
@@ -614,6 +644,11 @@ body.admin-landing .auth-card button {
     color: #ffffff;
 }
 
+body.bde-landing .auth-card button {
+    background: linear-gradient(135deg, #0f766e, #0ea5a3);
+    color: #ffffff;
+}
+
 .auth-help {
     margin: 16px 0 0;
     font-size: 13px;
@@ -627,6 +662,10 @@ body.admin-landing .auth-card button {
 
 body.admin-landing .auth-help a {
     color: #2563eb;
+}
+
+body.bde-landing .auth-help a {
+    color: #0f766e;
 }
 
 @media (max-width: 820px) {

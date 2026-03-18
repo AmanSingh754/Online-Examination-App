@@ -11,6 +11,7 @@ function StudentLogin() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [allowManualInput, setAllowManualInput] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ CLEAR ONLY STUDENT LOGIN CACHE ON PAGE LOAD
   useEffect(() => {
@@ -21,19 +22,17 @@ function StudentLogin() {
     localStorage.removeItem("studentDob");
     localStorage.removeItem("studentCourse");
     localStorage.removeItem("studentCollegeName");
-
-    // reset form
-    setEmail("");
-    setPassword("");
-    setError("");
   }, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (isLoggingIn) return;
     setError("");
+    setIsLoggingIn(true);
 
     if (!email || !password) {
       setError("Please enter email and password.");
+      setIsLoggingIn(false);
       return;
     }
 
@@ -47,6 +46,7 @@ function StudentLogin() {
       const data = await response.json();
       if (!data.success) {
         setError(data.message || "Invalid credentials.");
+        setIsLoggingIn(false);
         return;
       }
 
@@ -66,6 +66,7 @@ function StudentLogin() {
     } catch (err) {
       console.error("Student login error:", err);
       setError(err?.message || "Login failed. Please try again.");
+      setIsLoggingIn(false);
     }
   };
 
@@ -152,7 +153,9 @@ function StudentLogin() {
                   required
              />
 
-            <button type="submit">Login</button>
+            <button type="submit" disabled={isLoggingIn}>
+              {isLoggingIn ? "Logging in..." : "Login"}
+            </button>
           </form>
           {error && <p className="auth-help">{error}</p>}
           {!error && (

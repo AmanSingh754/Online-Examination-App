@@ -12,8 +12,42 @@ const azureConfig = {
     apiKey: (process.env.AZURE_OPENAI_API_KEY || "").trim()
 };
 
-const GRADING_PROMPT_VERSION = "walkin-descriptive-v2";
+const GRADING_PROMPT_VERSION = "walkin-descriptive-v4";
 const DEFAULT_TIMEOUT_MS = Number(process.env.LLM_GRADE_TIMEOUT_MS || 8000);
+
+const KNOWN_SHORT_TECH_TERMS = new Set([
+    "api",
+    "axios",
+    "c",
+    "c#",
+    "c++",
+    "css",
+    "dax",
+    "dbms",
+    "excel",
+    "express",
+    "html",
+    "java",
+    "javascript",
+    "json",
+    "matplotlib",
+    "mern",
+    "mongodb",
+    "mysql",
+    "node",
+    "nodejs",
+    "numpy",
+    "pandas",
+    "postgres",
+    "postgresql",
+    "powerbi",
+    "python",
+    "react",
+    "rest",
+    "sql",
+    "tableau",
+    "typescript"
+]);
 
 function clampScore(value, maxMarks) {
     const parsed = Number(value || 0);
@@ -35,6 +69,15 @@ function tokenize(text) {
         .filter((token) => token.length >= 4);
 }
 
+function tokenizeCompact(text) {
+    return String(text || "")
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, " ")
+        .split(/\s+/)
+        .map((token) => token.trim())
+        .filter(Boolean);
+}
+
 function normalizeLooseText(text) {
     return String(text || "")
         .toLowerCase()
@@ -51,9 +94,41 @@ function normalizeSentenceText(text) {
         .trim();
 }
 
+function normalizeTechToken(text) {
+    return String(text || "")
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/[^a-z0-9+#]/g, "")
+        .trim();
+}
+
 function stemToken(token) {
     let normalized = String(token || "").toLowerCase().trim();
     const synonymMap = {
+        app: "application",
+        apps: "application",
+        application: "application",
+        applications: "application",
+        programming: "program",
+        programing: "program",
+        frontend: "ui",
+        "front-end": "ui",
+        front: "ui",
+        client: "ui",
+        interface: "ui",
+        interfaces: "ui",
+        ui: "ui",
+        ux: "ui",
+        users: "user",
+        database: "db",
+        databases: "db",
+        dbms: "db",
+        nonrelational: "nosql",
+        nosql: "nosql",
+        relational: "sql",
+        mongodb: "mongodb",
+        mysql: "mysql",
+        flexible: "flexible",
         holds: "store",
         hold: "store",
         holding: "store",
@@ -98,6 +173,35 @@ function keywordCoverage(reference, studentAnswer) {
     return hits / refTokens.length;
 }
 
+function extractNumericTokens(text) {
+    const matches = String(text || "").match(/-?\d+(?:\.\d+)?/g);
+    return Array.isArray(matches) ? matches : [];
+}
+
+function tokenCoverageWithStems(reference, studentAnswer) {
+    const stopwords = new Set([
+        "the", "and", "for", "with", "that", "this", "from", "into", "used",
+        "use", "are", "is", "was", "were", "have", "has", "had", "will", "what",
+        "when", "where", "which", "inside", "output", "answer", "question", "mainly"
+    ]);
+    const refTokens = Array.from(new Set(
+        tokenizeCompact(reference)
+            .map(stemToken)
+            .filter((token) => token.length >= 2 && !stopwords.has(token))
+    ));
+    const ansSet = new Set(
+        tokenizeCompact(studentAnswer)
+            .map(stemToken)
+            .filter((token) => token.length >= 2 && !stopwords.has(token))
+    );
+    if (!refTokens.length) return 0;
+    let hits = 0;
+    for (const token of refTokens) {
+        if (ansSet.has(token)) hits += 1;
+    }
+    return hits / refTokens.length;
+}
+
 function bigramSet(text) {
     const clean = normalizeSentenceText(text).replace(/\s+/g, " ");
     if (!clean) return new Set();
@@ -120,6 +224,158 @@ function diceSimilarity(a, b) {
     return (2 * overlap) / (aSet.size + bSet.size);
 }
 
+function extractReferenceTechEntities(referenceText) {
+    const entities = new Set();
+    const rawTokens = String(referenceText || "").match(/\b[A-Za-z][A-Za-z0-9+#.]*\b/g) || [];
+    for (const token of rawTokens) {
+        const normalized = normalizeTechToken(token);
+        if (!normalized || normalized.length < 2) continue;
+
+        const isAllCaps = /[A-Z]/.test(token) && token === token.toUpperCase();
+        const isCamelCase = /[a-z][A-Z]|[A-Z][a-z]+[A-Z]/.test(token);
+        const hasSymbolOrDigit = /[+#.0-9]/.test(token);
+
+        if (isAllCaps || isCamelCase || hasSymbolOrDigit || KNOWN_SHORT_TECH_TERMS.has(normalized)) {
+            entities.add(normalized);
+        }
+    }
+    return Array.from(entities);
+}
+
+function computeShortEntityMatchFloor(reference, studentAnswer, maxMarks) {
+    const referenceText = String(reference || "").trim();
+    const studentText = String(studentAnswer || "").trim();
+    if (!referenceText || !studentText || !maxMarks) return 0;
+
+    const studentWordCount = tokenizeCompact(studentText).length;
+    const referenceWordCount = tokenizeCompact(referenceText).length;
+    if (studentWordCount === 0 || studentWordCount > 3 || referenceWordCount > 24) return 0;
+
+    const normalizedStudent = normalizeTechToken(studentText);
+    if (!normalizedStudent || normalizedStudent.length < 2) return 0;
+
+    const entities = extractReferenceTechEntities(referenceText);
+    if (!entities.length) return 0;
+
+    if (entities.includes(normalizedStudent)) {
+        // Protect concise but exact factual answers, e.g. "html" vs "HTML is not a programming language".
+        return clampScore(maxMarks * 0.85, maxMarks);
+    }
+    return 0;
+}
+
+function extractFunctionTokens(text) {
+    const input = String(text || "");
+    const tokens = new Set();
+    const withParens = input.match(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g) || [];
+    for (const raw of withParens) {
+        const name = raw.replace(/\(.*/, "").trim().toUpperCase();
+        if (name.length >= 2) tokens.add(name);
+    }
+
+    const knownBareFunctions = [
+        "CALCULATE", "SUM", "SUMX", "AVERAGE", "AVERAGEX", "COUNT", "COUNTROWS",
+        "DISTINCTCOUNT", "FILTER", "RELATED", "ALL", "ALLEXCEPT", "IF", "SWITCH",
+        "VLOOKUP", "XLOOKUP", "LOOKUPVALUE", "RANKX", "DATEADD", "TOTALYTD",
+        "RUNNING_SUM", "WINDOW_SUM", "ZN", "LOD"
+    ];
+    const knownPattern = new RegExp(`\\b(${knownBareFunctions.join("|")})\\b`, "gi");
+    let match = knownPattern.exec(input);
+    while (match) {
+        tokens.add(String(match[1] || "").toUpperCase());
+        match = knownPattern.exec(input);
+    }
+    return Array.from(tokens);
+}
+
+function countStructuredSteps(text) {
+    const lines = String(text || "").split(/\r?\n/);
+    let count = 0;
+    for (const line of lines) {
+        if (/^\s*(?:\d+[.)]|[-*])\s+/.test(line)) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+function computeStructuredAnswerCapScore(questionText, reference, studentAnswer, maxMarks) {
+    const referenceText = String(reference || "").trim();
+    const studentText = String(studentAnswer || "").trim();
+    const question = String(questionText || "").trim();
+    if (!referenceText || !studentText || !maxMarks) return clampScore(maxMarks, maxMarks);
+
+    const questionRef = `${question} ${referenceText}`;
+    const questionRefNorm = normalizeSentenceText(questionRef);
+    const studentNorm = normalizeSentenceText(studentText);
+    const coverage = tokenCoverageWithStems(referenceText, studentText);
+    let capRatio = 1;
+
+    const isSqlTask = /\b(sql|mysql|query|select|join|group by|having|where|order by)\b/i.test(questionRefNorm);
+    if (isSqlTask) {
+        const clauseChecks = [
+            /\bselect\b/i,
+            /\bfrom\b/i,
+            /\bjoin\b/i,
+            /\bwhere\b/i,
+            /\bgroup by\b/i,
+            /\bhaving\b/i,
+            /\border by\b/i
+        ];
+        let required = 0;
+        let matched = 0;
+        for (const regex of clauseChecks) {
+            if (regex.test(referenceText)) {
+                required += 1;
+                if (regex.test(studentText)) matched += 1;
+            }
+        }
+        const looksLikeSql = /\b(select|from|join|where|group by|having|order by|insert|update|delete)\b/i.test(studentNorm);
+        if (required >= 2) {
+            const missRatio = 1 - (matched / required);
+            if (!looksLikeSql) capRatio = Math.min(capRatio, 0.55);
+            else if (missRatio >= 0.6) capRatio = Math.min(capRatio, 0.62);
+            else if (missRatio >= 0.4) capRatio = Math.min(capRatio, 0.72);
+        } else if (!looksLikeSql && coverage < 0.55) {
+            capRatio = Math.min(capRatio, 0.7);
+        }
+    }
+
+    const isBITask = /\b(power\s*bi|powerbi|tableau|dax|power query|calculated field|measure)\b/i.test(questionRefNorm);
+    if (isBITask) {
+        const referenceFunctions = extractFunctionTokens(referenceText);
+        if (referenceFunctions.length) {
+            const studentFunctions = new Set(extractFunctionTokens(studentText));
+            let fnHits = 0;
+            for (const fn of referenceFunctions) {
+                if (studentFunctions.has(fn)) fnHits += 1;
+            }
+            const fnCoverage = fnHits / referenceFunctions.length;
+            if (fnCoverage === 0) capRatio = Math.min(capRatio, 0.65);
+            else if (fnCoverage < 0.5) capRatio = Math.min(capRatio, 0.78);
+        }
+    }
+
+    const asksForSteps = /\b(step|steps|procedure|process|workflow)\b/i.test(questionRefNorm);
+    if (asksForSteps) {
+        const refSteps = Math.max(
+            countStructuredSteps(referenceText),
+            (referenceText.match(/\b(?:first|second|third|then|next|finally)\b/gi) || []).length
+        );
+        const ansSteps = Math.max(
+            countStructuredSteps(studentText),
+            (studentText.match(/\b(?:first|second|third|then|next|finally)\b/gi) || []).length
+        );
+        if (refSteps >= 3 && ansSteps === 0 && coverage < 0.65) {
+            capRatio = Math.min(capRatio, 0.6);
+        } else if (refSteps >= 4 && ansSteps < Math.ceil(refSteps * 0.5) && coverage < 0.7) {
+            capRatio = Math.min(capRatio, 0.72);
+        }
+    }
+
+    return clampScore(capRatio * maxMarks, maxMarks);
+}
+
 function computeFairnessFloorScore(reference, studentAnswer, maxMarks) {
     const referenceText = String(reference || "").trim();
     const studentText = String(studentAnswer || "").trim();
@@ -131,8 +387,17 @@ function computeFairnessFloorScore(reference, studentAnswer, maxMarks) {
         return clampScore(maxMarks, maxMarks);
     }
 
+    const refNums = extractNumericTokens(referenceText);
+    const ansNums = extractNumericTokens(studentText);
+    if (refNums.length > 0 && refNums.every((token) => ansNums.includes(token))) {
+        return clampScore(maxMarks, maxMarks);
+    }
+
     const similarity = diceSimilarity(referenceText, studentText);
     const coverage = keywordCoverage(referenceText, studentText);
+    const stemCoverage = tokenCoverageWithStems(referenceText, studentText);
+    const referenceWordCount = tokenizeCompact(referenceText).length;
+    const shortEntityMatchFloor = computeShortEntityMatchFloor(referenceText, studentText, maxMarks);
     let minRatio = 0;
 
     if (similarity >= 0.97) minRatio = 1;
@@ -143,8 +408,19 @@ function computeFairnessFloorScore(reference, studentAnswer, maxMarks) {
 
     if (coverage >= 0.75) minRatio = Math.max(minRatio, 0.75);
     else if (coverage >= 0.6) minRatio = Math.max(minRatio, 0.6);
+    if (stemCoverage >= 0.85) minRatio = Math.max(minRatio, 0.9);
+    else if (stemCoverage >= 0.65) minRatio = Math.max(minRatio, 0.75);
+    else if (stemCoverage >= 0.45) minRatio = Math.max(minRatio, 0.6);
 
-    return clampScore(minRatio * maxMarks, maxMarks);
+    // Short factual references need stronger protection from under-scoring.
+    if (referenceWordCount <= 6) {
+        if (stemCoverage >= 0.8 || similarity >= 0.72) minRatio = Math.max(minRatio, 0.95);
+        else if (stemCoverage >= 0.55 || similarity >= 0.6) minRatio = Math.max(minRatio, 0.75);
+        else if (stemCoverage >= 0.35 || similarity >= 0.48) minRatio = Math.max(minRatio, 0.5);
+    }
+
+    const ratioFloorScore = clampScore(minRatio * maxMarks, maxMarks);
+    return Math.max(ratioFloorScore, shortEntityMatchFloor);
 }
 
 function fallbackSimilarityScore(reference, studentAnswer, maxMarks) {
@@ -357,11 +633,11 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
 
     const points4To8 = [];
     for (const text of extraPointTexts) {
-        if (points4To8.length >= 5) break;
+        if (points4To8.length >= 6) break;
         points4To8.push(text);
     }
     for (const text of fallbackPointTexts) {
-        if (points4To8.length >= 5) break;
+        if (points4To8.length >= 6) break;
         points4To8.push(text);
     }
 
@@ -370,7 +646,8 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
         "Areas for Improvement",
         "Communication and Writing Skills",
         "Topic-wise Stats",
-        "Overall Advisor Note"
+        "Overall Advisor Note",
+        "Coding Submission Review"
     ];
     const stripLegacyLabel = (value = "") =>
         String(value || "")
@@ -379,6 +656,7 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
             .replace(/^(grammar\/spelling(?:\/clarity)?|communication and writing skills)\s*:\s*/i, "")
             .replace(/^(topic-wise stats(?:\s*\+\s*internal skills \(from descriptive q&a\))?|topic-wise stats)\s*:\s*/i, "")
             .replace(/^(styled suggestions \+ final review|overall advisor note)\s*:\s*/i, "")
+            .replace(/^(coding submission review)\s*:\s*/i, "")
             .trim();
     const isGenericPlaceholder = (value = "", heading = "") => {
         const clean = String(value || "").trim().toLowerCase().replace(/[.:]/g, "");
@@ -390,7 +668,7 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
     };
 
     const rebuilt = [title, ...mandatory];
-    for (let i = 0; i < 5; i += 1) {
+    for (let i = 0; i < 6; i += 1) {
         const sectionTitle = sectionTitles[i] || `Point ${i + 4}`;
         const preferred = stripLegacyLabel(points4To8[i] || "");
         const fallbackBody = stripLegacyLabel(fallbackPointTexts[i] || "");
@@ -489,6 +767,7 @@ function buildWalkinSummaryAnalytics(rows = []) {
         }))
         .sort((a, b) => (b.max - a.max) || (a.pct - b.pct));
     const internalSkills = buildDescriptiveSkillAnalytics(rows);
+    const codingSubmissionReviewLine = buildCodingSubmissionReview(rows);
 
     return {
         sectionTotals,
@@ -497,7 +776,8 @@ function buildWalkinSummaryAnalytics(rows = []) {
         codingPassRate,
         majorWeaknessHints,
         topicBreakdown,
-        internalSkills
+        internalSkills,
+        codingSubmissionReviewLine
     };
 }
 
@@ -571,10 +851,11 @@ async function gradeWithOpenAI(prompt, model, timeoutMs, options = {}) {
     return String(response?.choices?.[0]?.message?.content || "");
 }
 
-async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks = 1) {
+async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks = 1, options = {}) {
     const normalizedMax = Number(maxMarks) || 1;
     const referenceText = (reference || "").trim();
     const studentText = (studentAnswer || "").trim();
+    const questionText = String(options.questionText || "").trim();
     const openaiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
     const baseMeta = {
@@ -592,15 +873,56 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
     }
 
     const prompt = [
-        `Score the student answer from 0 to ${normalizedMax}.`,
-        "Be generous for short, factual or output-based answers.",
-        "If the student answer is equivalent to the reference (same meaning/output), award full marks.",
-        "Treat trivial formatting, casing, or punctuation differences as fully correct.",
-        "Focus on conceptual correctness and semantic match.",
-        "Return only a number.",
-        `Reference: ${referenceText}`,
-        `Student: ${studentText}`
-    ].join("\n\n");
+        "You are an expert technical evaluator specializing in:",
+        "- SQL",
+        "- Excel",
+        "- Power BI",
+        "- Tableau",
+        "- Data Science",
+        "- MERN Stack (MongoDB, Express, React, Node.js)",
+        "",
+        "You will be provided with:",
+        "- Question",
+        "- Maximum marks",
+        "- Expected key points (reference answer)",
+        "- Candidate's answer",
+        "",
+        "Your task is to evaluate the candidate's answer objectively and assign a score.",
+        "",
+        "Evaluation Principles:",
+        "1. Base evaluation strictly on the provided expected key points.",
+        "2. Do NOT assume knowledge beyond what is explicitly written in the candidate's answer.",
+        "3. Do NOT hallucinate missing content.",
+        "4. Award marks proportionally based on technical accuracy, completeness, correct logic/syntax, and conceptual clarity.",
+        "5. Give partial credit where appropriate.",
+        "6. Full marks may be awarded ONLY if all major expected key points are covered, no significant technical errors exist, and logic/explanation is correct.",
+        "7. If even one critical key point is missing or incorrect, full marks must NOT be awarded.",
+        "8. Penalize incorrect concepts or wrong technical logic.",
+        "9. Ignore minor grammar, spelling, or formatting errors if technical meaning is clear.",
+        "10. Do NOT inflate marks for vague, generic, or partially correct answers.",
+        "11. If the answer is long but technically incorrect, reduce marks accordingly.",
+        "12. If the candidate gives a concise direct answer that exactly matches the core expected entity/term (case-insensitive), award substantial credit.",
+        "",
+        "Domain-Specific Rules:",
+        "- For SQL/MySQL queries: validate syntax, SELECT logic, JOIN conditions, WHERE filters, GROUP BY, HAVING, ORDER BY. Accept logically equivalent queries. Deduct heavily when query structure or logic is wrong.",
+        "- For Data Science: validate algorithm correctness, statistical reasoning, and conceptual clarity.",
+        "- For MERN: validate frontend-backend architecture understanding and React, API, Databases clarity.",
+        "- For Excel: validate formula correctness and argument usage.",
+        "- For Power BI / Tableau: validate function names (DAX/calculated fields), relationships, measures, and visualization reasoning; generic answers without required functions must not receive high marks.",
+        "- For step/procedure questions: check whether key steps are present in logical order; missing major steps must reduce marks.",
+        "",
+        "Scoring Rules:",
+        "- Score must be between 0 and max_score.",
+        "- Do NOT exceed max_score.",
+        "- Be strict, objective, and consistent.",
+        "- Return ONLY the numeric score.",
+        "- Do NOT provide explanation.",
+        "",
+        `Question: ${questionText || "Descriptive technical response evaluation"}`,
+        `Maximum marks (max_score): ${normalizedMax}`,
+        `Expected key points (reference answer): ${referenceText}`,
+        `Candidate's answer: ${studentText}`
+    ].join("\n");
 
     let azureFailureReason = "";
     if (isAzureConfigured()) {
@@ -609,7 +931,21 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
             const parsedScore = parseNumericScore(rawOutput);
             const clampedScore = clampScore(parsedScore, normalizedMax);
             const fairnessFloorScore = computeFairnessFloorScore(referenceText, studentText, normalizedMax);
-            const finalScore = Math.max(clampedScore, fairnessFloorScore);
+            const strictCapScore = computeStructuredAnswerCapScore(
+                questionText,
+                referenceText,
+                studentText,
+                normalizedMax
+            );
+            const finalScore = clampScore(
+                Math.min(Math.max(clampedScore, fairnessFloorScore), strictCapScore),
+                normalizedMax
+            );
+            const reasonParts = [];
+            if (finalScore > clampedScore) reasonParts.push("fairness_floor_applied");
+            if (strictCapScore < normalizedMax && finalScore < Math.max(clampedScore, fairnessFloorScore)) {
+                reasonParts.push("structured_cap_applied");
+            }
 
             return {
                 score: finalScore,
@@ -618,7 +954,7 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
                     provider: "azure",
                     model: azureConfig.deployment,
                     rawOutput,
-                    reason: finalScore > clampedScore ? "ok_with_fairness_floor" : "ok"
+                    reason: reasonParts.length ? `ok_${reasonParts.join("_and_")}` : "ok"
                 }
             };
         } catch (error) {
@@ -631,7 +967,21 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
         const parsedScore = parseNumericScore(rawOutput);
         const clampedScore = clampScore(parsedScore, normalizedMax);
         const fairnessFloorScore = computeFairnessFloorScore(referenceText, studentText, normalizedMax);
-        const finalScore = Math.max(clampedScore, fairnessFloorScore);
+        const strictCapScore = computeStructuredAnswerCapScore(
+            questionText,
+            referenceText,
+            studentText,
+            normalizedMax
+        );
+        const finalScore = clampScore(
+            Math.min(Math.max(clampedScore, fairnessFloorScore), strictCapScore),
+            normalizedMax
+        );
+        const reasonParts = [];
+        if (finalScore > clampedScore) reasonParts.push("fairness_floor_applied");
+        if (strictCapScore < normalizedMax && finalScore < Math.max(clampedScore, fairnessFloorScore)) {
+            reasonParts.push("structured_cap_applied");
+        }
 
         return {
             score: finalScore,
@@ -640,13 +990,22 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
                 provider: "openai",
                 model: openaiModel,
                 rawOutput,
-                reason: finalScore > clampedScore ? "ok_with_fairness_floor" : "ok"
+                reason: reasonParts.length ? `ok_${reasonParts.join("_and_")}` : "ok"
             }
         };
     } catch (error) {
         const fallbackScore = fallbackSimilarityScore(referenceText, studentText, normalizedMax);
         const fairnessFloorScore = computeFairnessFloorScore(referenceText, studentText, normalizedMax);
-        const finalFallbackScore = Math.max(fallbackScore, fairnessFloorScore);
+        const strictCapScore = computeStructuredAnswerCapScore(
+            questionText,
+            referenceText,
+            studentText,
+            normalizedMax
+        );
+        const finalFallbackScore = clampScore(
+            Math.min(Math.max(fallbackScore, fairnessFloorScore), strictCapScore),
+            normalizedMax
+        );
         const openaiFailureReason = extractErrorMessage(error);
         const reason = azureFailureReason
             ? `azure_failed: ${azureFailureReason}; openai_failed: ${openaiFailureReason}`
@@ -659,15 +1018,213 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
             meta: {
                 ...baseMeta,
                 usedFallback: true,
-                reason: finalFallbackScore > fallbackScore ? `${reason}; fairness_floor_applied` : reason
+                reason:
+                    finalFallbackScore > fallbackScore
+                        ? `${reason}; fairness_floor_applied`
+                        : strictCapScore < normalizedMax && finalFallbackScore < fallbackScore
+                            ? `${reason}; structured_cap_applied`
+                            : reason
             }
         };
     }
 }
 
-async function gradeDescriptiveAnswer(reference, studentAnswer, maxMarks = 1) {
-    const result = await gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks);
+async function gradeDescriptiveAnswer(reference, studentAnswer, maxMarks = 1, options = {}) {
+    const result = await gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks, options);
     return result.score;
+}
+
+function stableTextHash(input = "") {
+    const text = String(input || "");
+    let hash = 0;
+    for (let i = 0; i < text.length; i += 1) {
+        hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+    }
+    return Math.abs(hash);
+}
+
+function pickSeededVariant(choices = [], seedText = "") {
+    if (!Array.isArray(choices) || choices.length === 0) return "";
+    const idx = stableTextHash(seedText) % choices.length;
+    return String(choices[idx] || choices[0] || "");
+}
+
+function buildDiverseNarrativeFromStats({
+    seed,
+    majorWeaknesses,
+    strengths,
+    descriptiveSkill,
+    codingByDifficulty,
+    codingSubmissionReviewLine,
+    aptitudePct,
+    technicalPctValue,
+    hardCodingWeak,
+    topicStatsLine,
+    skillSignalLine
+}) {
+    const strongEvidence = descriptiveSkill.strongSkills.length
+        ? descriptiveSkill.strongSkills.slice(0, 2).join("; ")
+        : (strengths.length ? strengths.slice(0, 2).join("; ") : "No clear dominant topic yet");
+    const weakEvidence = descriptiveSkill.weakSkills.length
+        ? descriptiveSkill.weakSkills.slice(0, 3).join("; ")
+        : (majorWeaknesses.length ? majorWeaknesses.slice(0, 3).join("; ") : "Needs consistency in mixed-difficulty sections");
+
+    const clarityRiskCount = descriptiveSkill.skills.filter((skill) => Number(skill.clarityRiskRate || 0) >= 0.5).length;
+    const commBody = technicalPctValue <= 55
+        ? pickSeededVariant(
+            [
+                `Technical descriptive responses need cleaner structure and grammar. Clarity risk is visible in ${clarityRiskCount || "multiple"} topic buckets; short, precise sentence framing is needed.`,
+                "Written technical communication is currently below expectation. Frequent clarity and grammar breaks are reducing answer quality in descriptive sections.",
+                "Communication quality is affecting descriptive scoring. Improve grammar control, sentence flow, and direct point-to-point explanations."
+            ],
+            `${seed}|comm|low`
+        )
+        : pickSeededVariant(
+            [
+                "Technical writing is mostly understandable with minor grammar and phrasing issues. Better structuring can further improve scoring.",
+                "Communication quality is acceptable overall; refine sentence precision and remove vague wording for stronger descriptive impact.",
+                "Descriptive writing is fairly clear. Small grammar and structure improvements can convert moderate responses into strong ones."
+            ],
+            `${seed}|comm|ok`
+        );
+
+    const priorityFocus = hardCodingWeak
+        ? "hard-level coding problem decomposition and edge-case handling"
+        : (technicalPctValue < 55
+            ? "technical concept clarity and answer structuring"
+            : "consistency across timed mixed-question blocks");
+    const practiceFocus = aptitudePct < 60
+        ? "aptitude speed-accuracy drills with strict timeboxing"
+        : "testcase-first validation before final coding submission";
+    const reviewFocus = majorWeaknesses.length
+        ? majorWeaknesses.slice(0, 2).join("; ")
+        : "overall section balance and answer precision";
+
+    const advisorBody = pickSeededVariant(
+        [
+            `[Priority] Focus on ${priorityFocus}. | [Practice] Continue ${practiceFocus}. | [Review] Weekly review should track: ${reviewFocus}.`,
+            `[Priority] Primary gap: ${priorityFocus}. | [Practice] Daily effort on ${practiceFocus}. | [Review] Keep checkpoints on ${reviewFocus}.`,
+            `[Priority] Immediate target is ${priorityFocus}. | [Practice] Follow ${practiceFocus}. | [Review] Re-evaluate progress against ${reviewFocus}.`
+        ],
+        `${seed}|advisor`
+    );
+
+    const strengthBody = pickSeededVariant(
+        [
+            `${strongEvidence}. Evidence from section performance: Aptitude ${aptitudePct}%, Technical ${technicalPctValue}%.`,
+            `${strongEvidence}. Section-level evidence indicates better stability in high-scoring buckets.`,
+            `${strongEvidence}. Current scoring pattern shows stronger control in these areas versus weaker buckets.`
+        ],
+        `${seed}|strength`
+    );
+
+    const improvementBody = pickSeededVariant(
+        [
+            `${weakEvidence}. Primary attention is required where low-score attempts are repeating.`,
+            `${weakEvidence}. Improvement depends on reducing repeated low-ratio attempts and increasing answer completeness.`,
+            `${weakEvidence}. These are currently the largest score-dragging areas and should be treated as immediate focus.`
+        ],
+        `${seed}|improve`
+    );
+
+    const codingTrend = `Coding testcase trend E/M/H: ${codingByDifficulty.easy.passed}/${codingByDifficulty.easy.total}, ${codingByDifficulty.medium.passed}/${codingByDifficulty.medium.total}, ${codingByDifficulty.hard.passed}/${codingByDifficulty.hard.total}.`;
+    const topicBody = pickSeededVariant(
+        [
+            `${topicStatsLine || "Topic-wise marks unavailable for this attempt."} Skill signals: ${skillSignalLine}. ${codingTrend}`,
+            `${topicStatsLine || "Topic-wise marks unavailable for this attempt."} Inferred skill profile: ${skillSignalLine}. ${codingTrend}`,
+            `${topicStatsLine || "Topic-wise marks unavailable for this attempt."} Internal skill indicators: ${skillSignalLine}. ${codingTrend}`
+        ],
+        `${seed}|topic`
+    );
+
+    return {
+        strengthBody,
+        improvementBody,
+        commBody,
+        topicBody,
+        advisorBody,
+        codingReviewBody: codingSubmissionReviewLine || "Coding submissions were limited; collect more code attempts for reliable quality review."
+    };
+}
+
+function hasLikelySyntaxIssue(codeText = "") {
+    const text = String(codeText || "");
+    if (!text.trim()) return false;
+    const stack = [];
+    const openToClose = { "(": ")", "{": "}", "[": "]" };
+    const closers = new Set(Object.values(openToClose));
+    for (const char of text) {
+        if (openToClose[char]) {
+            stack.push(openToClose[char]);
+        } else if (closers.has(char)) {
+            const expected = stack.pop();
+            if (expected !== char) return true;
+        }
+    }
+    if (stack.length > 0) return true;
+    const singleQuotes = (text.match(/'/g) || []).length;
+    const doubleQuotes = (text.match(/"/g) || []).length;
+    if (singleQuotes % 2 !== 0 || doubleQuotes % 2 !== 0) return true;
+    return false;
+}
+
+function inferCodeConstructs(codeText = "") {
+    const text = String(codeText || "").toLowerCase();
+    const constructs = [];
+    if (/\bfor\b|\bwhile\b/.test(text)) constructs.push("loops");
+    if (/\bif\b|\belse\b|\bswitch\b/.test(text)) constructs.push("conditions");
+    if (/\bfunction\b|=>|\bdef\b|\bclass\b/.test(text)) constructs.push("functions");
+    if (/\btry\b|\bcatch\b|\bexcept\b/.test(text)) constructs.push("error-handling");
+    if (!constructs.length) constructs.push("basic statements");
+    return constructs.slice(0, 2).join(" + ");
+}
+
+function buildCodingSubmissionReview(rows = []) {
+    const codingRows = (rows || []).filter((row) => String(row.question_type || "").toUpperCase() === "CODING");
+    if (!codingRows.length) {
+        return "No coding submission detected for this attempt.";
+    }
+
+    const details = [];
+    let syntaxRiskCount = 0;
+    let strongCount = 0;
+    let weakCount = 0;
+
+    for (const row of codingRows) {
+        const difficulty = String(row.coding_difficulty || "hard").trim().toLowerCase() || "hard";
+        const label = difficulty.includes("easy")
+            ? "easy"
+            : (difficulty.includes("medium") || difficulty.includes("intermediate") ? "medium" : "hard");
+        const code = String(row.code || "");
+        const hasCode = Boolean(code.trim());
+        const passed = Math.max(0, Number(row.testcases_passed || 0));
+        const total = Math.max(0, Number(row.total_testcases || 0));
+        const passRate = total > 0 ? passed / total : 0;
+        const syntaxRisk = hasCode ? hasLikelySyntaxIssue(code) : false;
+        const constructs = hasCode ? inferCodeConstructs(code) : "no code body";
+
+        let verdict = "fair";
+        if (!hasCode) verdict = "not attempted";
+        else if (syntaxRisk || (total > 0 && passRate === 0)) verdict = "needs fix";
+        else if (passRate >= 0.8 && code.trim().length >= 40) verdict = "good";
+
+        if (verdict === "good") strongCount += 1;
+        if (verdict === "needs fix" || verdict === "not attempted") weakCount += 1;
+        if (syntaxRisk) syntaxRiskCount += 1;
+
+        details.push(
+            `${label}: ${verdict}, TC ${passed}/${total || 0}, code uses ${constructs}`
+        );
+    }
+
+    const overallVerdict = weakCount === 0
+        ? "Good"
+        : (strongCount > 0 && weakCount < codingRows.length ? "Mixed" : "Needs Improvement");
+    const syntaxNote = syntaxRiskCount > 0
+        ? `possible syntax/structure issues found in ${syntaxRiskCount} coding answer(s)`
+        : "no obvious syntax-pattern issues detected";
+
+    return `${overallVerdict}. ${details.join("; ")}. ${syntaxNote}.`;
 }
 
 function buildDeterministicWalkinSummary(student, rows) {
@@ -732,12 +1289,6 @@ function buildDeterministicWalkinSummary(student, rows) {
         codingByDifficulty.easy.scored + codingByDifficulty.medium.scored + codingByDifficulty.hard.scored,
         codingByDifficulty.easy.max + codingByDifficulty.medium.max + codingByDifficulty.hard.max
     );
-    const technicalPct = sectionStats.Technical.max > 0
-        ? sectionStats.Technical.scored / sectionStats.Technical.max
-        : 0;
-    const grammarNote = technicalPct <= 0.55
-        ? "Technical descriptive responses show grammar/spelling/clarity issues; the student needs to improve English communication and grammar skills."
-        : "Technical descriptive responses are mostly clear with minor grammar refinements needed.";
     const majorWeaknesses = [];
     const strengths = [];
 
@@ -768,15 +1319,6 @@ function buildDeterministicWalkinSummary(student, rows) {
     } else if (codingByDifficulty.hard.max > 0 && codingByDifficulty.hard.scored === 0) {
         majorWeaknesses.push("Hard-level coding not solved; needs stronger problem decomposition and planning");
     }
-    const primaryWeakArea = majorWeaknesses.length
-        ? majorWeaknesses[0]
-        : "Consistency under mixed-difficulty questions";
-    const weaknessLine = majorWeaknesses.length
-        ? majorWeaknesses.slice(0, 3).join("; ")
-        : primaryWeakArea;
-    const strengthsLine = strengths.length
-        ? strengths.slice(0, 2).join("; ")
-        : "Shows willingness to attempt across sections, with scope to improve outcomes.";
     const topicStatsLine = Object.entries(topicTotals)
         .map(([topic, stats]) => {
             const topicPct = stats.max > 0 ? Math.round((stats.scored / stats.max) * 100) : 0;
@@ -797,36 +1339,43 @@ function buildDeterministicWalkinSummary(student, rows) {
             .map((skill) => `${skill.skill} ${fmt(skill.scored, skill.max)} (${skill.pct}%, ${skill.level})`)
             .join("; ")
         : "Insufficient descriptive-topic evidence to infer internal skill strengths/weaknesses.";
-    const internalStrongLine = descriptiveSkill.strongSkills.length
-        ? descriptiveSkill.strongSkills.join("; ")
-        : strengthsLine;
-    const internalLaborLine = descriptiveSkill.weakSkills.length
-        ? descriptiveSkill.weakSkills.join("; ")
-        : weaknessLine;
-    const suggestionPriority = hardCodingWeak
-        ? "Prioritize hard-level coding with 1 timed problem daily plus edge-case dry runs."
-        : technicalPctValue < 55
-            ? "Prioritize technical concept clarity: revise one topic and write one structured explanation daily."
-            : "Prioritize consistency: maintain accuracy with mixed-difficulty timed sets.";
-    const suggestionPractice = aptitudePct < 60
-        ? "Practice aptitude in 25-minute timed blocks focused on speed + error logging."
-        : "Practice coding testcase validation before final submission to avoid avoidable misses.";
-    const finalReview = majorWeaknesses.length
-        ? `Current focus should remain on labor topics: ${majorWeaknesses.slice(0, 2).join("; ")}.`
-        : "Current performance is stable; maintain momentum with regular timed practice and clarity-first explanations.";
-    const styledSuggestionLine =
-        `[Priority] ${suggestionPriority} | [Practice] ${suggestionPractice} | [Review] ${finalReview}`;
+    const codingSubmissionReviewLine = buildCodingSubmissionReview(rows);
+    const summarySeed = [
+        student?.name || "student",
+        student?.course || "walkin",
+        aptitudePct,
+        technicalPctValue,
+        codingPct,
+        sectionStats.Aptitude.attempted,
+        sectionStats.Technical.attempted,
+        sectionStats.Coding.attempted,
+        Object.keys(topicTotals).sort().join("|")
+    ].join("|");
+    const narrative = buildDiverseNarrativeFromStats({
+        seed: summarySeed,
+        majorWeaknesses,
+        strengths,
+        descriptiveSkill,
+        codingByDifficulty,
+        codingSubmissionReviewLine,
+        aptitudePct,
+        technicalPctValue,
+        hardCodingWeak,
+        topicStatsLine,
+        skillSignalLine
+    });
 
     return normalizeSummaryText([
         `Performance Summary of ${student?.name || "this student"} (${student?.course || "Walk-In"})`,
         `1. Aptitude: ${fmt(sectionStats.Aptitude.scored, sectionStats.Aptitude.max)} (${pct(sectionStats.Aptitude.scored, sectionStats.Aptitude.max)}).`,
         `2. Technical: ${fmt(sectionStats.Technical.scored, sectionStats.Technical.max)} (${pct(sectionStats.Technical.scored, sectionStats.Technical.max)}).`,
         `3. Coding: Easy ${fmt(codingByDifficulty.easy.scored, codingByDifficulty.easy.max)}, Medium ${fmt(codingByDifficulty.medium.scored, codingByDifficulty.medium.max)}, Hard ${fmt(codingByDifficulty.hard.scored, codingByDifficulty.hard.max)}; testcase trend E/M/H = ${codingByDifficulty.easy.passed}/${codingByDifficulty.easy.total}, ${codingByDifficulty.medium.passed}/${codingByDifficulty.medium.total}, ${codingByDifficulty.hard.passed}/${codingByDifficulty.hard.total}.`,
-        `4. Strengths: ${internalStrongLine}.`,
-        `5. Areas for Improvement: ${internalLaborLine}.`,
-        `6. Communication and Writing Skills: ${grammarNote}`,
-        `7. Topic-wise Stats: ${topicStatsLine || "Topic-wise marks unavailable for this attempt."} Skill signals: ${skillSignalLine}.`,
-        `8. Overall Advisor Note: ${styledSuggestionLine}`
+        `4. Strengths: ${narrative.strengthBody}`,
+        `5. Areas for Improvement: ${narrative.improvementBody}`,
+        `6. Communication and Writing Skills: ${narrative.commBody}`,
+        `7. Topic-wise Stats: ${narrative.topicBody}`,
+        `8. Overall Advisor Note: ${narrative.advisorBody}`,
+        `9. Coding Submission Review: ${narrative.codingReviewBody}`
     ].join("\n"));
 }
 
@@ -847,6 +1396,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         coding_difficulty: row.coding_difficulty || "",
         testcases_passed: Number(row.testcases_passed || 0),
         total_testcases: Number(row.total_testcases || 0),
+        code: String(row.code || ""),
         question_text: String(row.question_text || ""),
         descriptive_answer: String(row.descriptive_answer || ""),
         reference_answer: String(row.reference_answer || "")
@@ -856,7 +1406,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
     const prompt = [
         "Create a concise, evidence-based performance summary for a walk-in student exam review.",
         "First line must be a title: Performance Summary of <Student Name> (<Stream>).",
-        "After the title, return exactly 8 numbered points, each on a new line.",
+        "After the title, return exactly 9 numbered points, each on a new line.",
         "Do not mention or quote specific question text.",
         "Use simple professional language with direct advisor tone.",
         "Prioritize weaknesses, mistakes, and weak areas over generic praise.",
@@ -869,6 +1419,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         "Point 6 heading must be exactly: Communication and Writing Skills. Content: grammar/spelling/clarity for descriptive answers.",
         "Point 7 heading must be exactly: Topic-wise Stats. Content: numeric stats plus inferred internal skills with marks %, attempt count, and Strong/Moderate/Weak label.",
         "Point 8 heading must be exactly: Overall Advisor Note. Content: styled suggestions using tags like [Priority], [Practice], [Review].",
+        "Point 9 heading must be exactly: Coding Submission Review. Content: evaluate submitted coding answers as Good/Fair/Needs fix using testcase evidence and code quality hints (syntax/structure/constructs).",
         "Never use the phrases 'Promotion blocked' or 'Next milestone'.",
         "Keep the summary technical, metric-heavy, and evidence-led.",
         "Infer internal skills from question_text + reference_answer + student descriptive_answer.",
@@ -881,7 +1432,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
 
     const llmOptions = {
         systemMessage: "You are an exam performance analyst. Return plain text only.",
-        temperature: 0.1,
+        temperature: 0.35,
         maxTokens: 420
     };
     const openaiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";

@@ -11,23 +11,26 @@ function AdminLogin() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [allowManualInput, setAllowManualInput] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   useEffect(() => {
     localStorage.removeItem("adminId");
+    localStorage.removeItem("adminRole");
+    localStorage.removeItem("adminDisplayName");
+    localStorage.removeItem("adminEmail");
     localStorage.removeItem("collegeId");
     localStorage.removeItem("collegeName");
-
-    setEmail("");
-    setPassword("");
-    setError("");
   }, []);
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (isLoggingIn) return;
     setError("");
+    setIsLoggingIn(true);
 
     if (!email || !password) {
       setError("Please enter email and password.");
+      setIsLoggingIn(false);
       return;
     }
 
@@ -41,14 +44,23 @@ function AdminLogin() {
       const data = await response.json();
       if (!data.success) {
         setError(data.message || "Invalid credentials.");
+        setIsLoggingIn(false);
         return;
       }
 
       localStorage.setItem("adminId", data.adminId);
+      localStorage.setItem("adminRole", String(data.role || "ADMIN").toUpperCase());
+      localStorage.setItem("adminDisplayName", data.displayName || data.email || "");
+      localStorage.setItem("adminEmail", data.email || email || "");
+      if (String(data.role || "").toUpperCase() === "BDE") {
+        navigate("/bde/dashboard");
+        return;
+      }
       navigate("/admin/dashboard");
     } catch (err) {
       console.error("Admin login error:", err);
       setError(err?.message || "Login failed. Please try again.");
+      setIsLoggingIn(false);
     }
   };
 
@@ -128,7 +140,9 @@ function AdminLogin() {
               required
             />
 
-            <button type="submit">Login</button>
+            <button type="submit" disabled={isLoggingIn}>
+              {isLoggingIn ? "Logging in..." : "Login"}
+            </button>
           </form>
           {error && <p className="auth-help">{error}</p>}
           {!error && (

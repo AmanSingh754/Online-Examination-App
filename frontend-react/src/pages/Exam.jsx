@@ -14,9 +14,10 @@ const LANGUAGE_OPTIONS = [
 const INSTRUCTIONS = [
   "When you click Next, your current answer will be saved and you can move forward.",
   "To revisit an earlier question, please use the Previous button.",
-  "Please avoid refreshing or closing the browser while the exam is in progress.",
-  "Fullscreen is mandatory. If fullscreen is disabled 3 times, your exam will be auto-submitted."
+  "Please avoid refreshing or closing the browser while the exam is in progress."
 ];
+const FEEDBACK_QUESTION =
+  "Tell us about the exam, question quality, and overall difficulty (max 100 words).";
 
 const SECTION_INSTRUCTIONS = {
   aptitude: {
@@ -97,9 +98,31 @@ const exitFullscreenSafe = async () => {
 
   try {
     await exit.call(document);
-  } catch (_) {
+  } catch {
     /* ignore fullscreen exit errors */
   }
+};
+
+const isIOSPlatform = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = String(navigator.userAgent || "");
+  const platform = String(navigator.platform || "");
+  const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
+  const iOSByUA = /iPad|iPhone|iPod/i.test(ua);
+  const iPadOSDesktopMode = platform === "MacIntel" && maxTouchPoints > 1;
+  return iOSByUA || iPadOSDesktopMode;
+};
+
+const hasFullscreenSupport = () => {
+  if (typeof document === "undefined") return false;
+  const docEl = document.documentElement;
+  if (!docEl) return false;
+  return Boolean(
+    docEl.requestFullscreen ||
+      docEl.webkitRequestFullscreen ||
+      docEl.mozRequestFullScreen ||
+      docEl.msRequestFullscreen
+  );
 };
 
 export default function Exam() {
@@ -125,7 +148,7 @@ export default function Exam() {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [consoleLines, setConsoleLines] = useState([]);
-  const [codingInput, setCodingInput] = useState("");
+  const [codingInput] = useState("");
   const [codingOutput, setCodingOutput] = useState("");
   const [codingLanguage, setCodingLanguage] = useState(DEFAULT_LANGUAGE);
   const [codingLanguageByQuestion, setCodingLanguageByQuestion] = useState({});
@@ -138,8 +161,14 @@ export default function Exam() {
   const [submitConfirmOpen, setSubmitConfirmOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [savedQuestions, setSavedQuestions] = useState({});
+  const [autosaveStatus, setAutosaveStatus] = useState("");
   const [submitMessage, setSubmitMessage] = useState("");
   const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [feedbackError, setFeedbackError] = useState("");
+  const [isSavingFeedback, setIsSavingFeedback] = useState(false);
+  const [submittedContext, setSubmittedContext] = useState(null);
   const [violationWarning, setViolationWarning] = useState({
     open: false,
     count: 0,
@@ -150,8 +179,24 @@ export default function Exam() {
   const [descriptiveLimitMessage, setDescriptiveLimitMessage] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(null);
   const [remainingSeconds, setRemainingSeconds] = useState(null);
+  const isIOS = isIOSPlatform();
+  const fullscreenSupported = hasFullscreenSupport();
+  const strictProctoringEnabled = !isIOS && fullscreenSupported;
+  const instructionList = useMemo(
+    () => [
+      ...INSTRUCTIONS,
+      strictProctoringEnabled
+        ? "Fullscreen is mandatory. If fullscreen is disabled 3 times, your exam will be auto-submitted."
+        : "Mobile-safe mode: fullscreen enforcement is disabled on this device."
+    ],
+    [strictProctoringEnabled]
+  );
   const violationCooldownRef = useRef(0);
+  const lastAutosavePayloadRef = useRef("");
+  const autosaveInFlightRef = useRef(false);
+  const draftRecoveryAttemptedRef = useRef(false);
   const autoSubmitTriggeredRef = useRef(false);
+  const timeAutoSubmitTriggeredRef = useRef(false);
   const focusLossActiveRef = useRef(false);
   const fullscreenViolationActiveRef = useRef(false);
   const securityNoticeTimeoutRef = useRef(null);
@@ -169,6 +214,7 @@ export default function Exam() {
       preExamOpen ||
       sectionOverlayOpen ||
       submitConfirmOpen ||
+      feedbackOpen ||
       Boolean(submitMessage) ||
       violationWarning.open;
     if (!shouldLockScroll) return undefined;
@@ -182,9 +228,9 @@ export default function Exam() {
       document.body.style.overflow = previousOverflow;
       document.body.style.touchAction = previousTouchAction;
     };
-  }, [preExamOpen, sectionOverlayOpen, submitConfirmOpen, submitMessage, violationWarning.open]);
+  }, [feedbackOpen, preExamOpen, sectionOverlayOpen, submitConfirmOpen, submitMessage, violationWarning.open]);
 
-  const getAnswerKey = (question, languageOverride = null) => {
+  const getAnswerKey = useCallback((question, languageOverride = null) => {
     if (!question) return "";
     const basis = (question.section_name || question.question_type || "general").replace(/\s+/g, "").toLowerCase();
     const qType = String(question.question_type || "MCQ").toLowerCase();
@@ -193,9 +239,12 @@ export default function Exam() {
       return `${basis}-${question.question_id}-${lang}`;
     }
     return `${basis}-${question.question_id}`;
-  };
-  const readAnswer = (question, languageOverride = null) =>
-    (question ? answers[getAnswerKey(question, languageOverride)] || "" : "");
+  }, [codingLanguage]);
+  const readAnswer = useCallback(
+    (question, languageOverride = null) =>
+      (question ? answers[getAnswerKey(question, languageOverride)] || "" : ""),
+    [answers, getAnswerKey]
+  );
 
   const currentQuestion = questionBank[currentIndex];
   const questionType = (currentQuestion?.question_type || "MCQ").toLowerCase();
@@ -208,6 +257,8 @@ export default function Exam() {
   const isCurrentDescriptiveOverLimit =
     Boolean(currentDescriptiveWordLimit) && currentDescriptiveWordCount > currentDescriptiveWordLimit;
   const isCurrentSaved = currentQuestion ? Boolean(savedQuestions[currentQuestion.question_id]) : false;
+  const feedbackWordCount = useMemo(() => countWords(feedbackText), [feedbackText]);
+  const isFeedbackTooLong = feedbackWordCount > 100;
   const parseTestcases = useCallback((payload) => {
     if (!payload) {
       return [];
@@ -377,7 +428,7 @@ export default function Exam() {
     const controller = new AbortController();
     setLoading(true);
 
-    fetch(`/exam/questions/${examId}`, { credentials: "include", signal: controller.signal })
+    fetch(`/exam/regular_exam_questions/${examId}`, { credentials: "include", signal: controller.signal })
       .then(async (res) => {
         const data = await res.json().catch(() => null);
         if (!res.ok) {
@@ -408,6 +459,125 @@ export default function Exam() {
   }, [examId]);
 
   useEffect(() => {
+    if (!examId || !questionBank.length) return;
+    if (draftRecoveryAttemptedRef.current) return;
+    draftRecoveryAttemptedRef.current = true;
+
+    const byQuestionId = new Map(
+      questionBank.map((question) => [Number(question?.question_id || 0), question])
+    );
+
+    fetch(`/exam/draft/${examId}`, { credentials: "include" })
+      .then(async (res) => {
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data?.success) return null;
+        return data;
+      })
+      .then((data) => {
+        const drafts = Array.isArray(data?.drafts) ? data.drafts : [];
+        if (!drafts.length) return;
+
+        const nextAnswers = {};
+        const nextSavedQuestions = {};
+        const nextCodingLanguageByQuestion = {};
+        const nextCodingSummary = {};
+
+        drafts.forEach((draft) => {
+          const questionId = Number(draft?.question_id || 0);
+          if (!questionId) return;
+          const question = byQuestionId.get(questionId);
+          if (!question) return;
+
+          const qType = String(draft?.question_type || "").trim().toLowerCase();
+          const base = (question.section_name || question.question_type || "general")
+            .replace(/\s+/g, "")
+            .toLowerCase();
+
+          if (qType === "coding") {
+            const lang = String(draft?.coding_language || DEFAULT_LANGUAGE).trim().toLowerCase() || DEFAULT_LANGUAGE;
+            const key = `${base}-${questionId}-${lang}`;
+            const code = String(draft?.code || "");
+            nextAnswers[key] = code;
+            nextCodingLanguageByQuestion[questionId] = lang;
+            nextCodingSummary[questionId] = {
+              passed: Number(draft?.testcases_passed || 0),
+              total: Number(draft?.testcases_total || 0)
+            };
+            if (code.trim()) nextSavedQuestions[questionId] = true;
+            return;
+          }
+
+          const key = `${base}-${questionId}`;
+          if (qType === "descriptive") {
+            const descriptive = String(draft?.descriptive_answer || "");
+            nextAnswers[key] = descriptive;
+            if (descriptive.trim()) nextSavedQuestions[questionId] = true;
+            return;
+          }
+
+          const selected = String(draft?.selected_option || "").trim().toUpperCase();
+          nextAnswers[key] = selected;
+          if (selected) nextSavedQuestions[questionId] = true;
+        });
+
+        setAnswers((prev) => ({ ...prev, ...nextAnswers }));
+        setSavedQuestions((prev) => ({ ...prev, ...nextSavedQuestions }));
+        setCodingLanguageByQuestion((prev) => ({ ...prev, ...nextCodingLanguageByQuestion }));
+        setCodingRunSummary((prev) => ({ ...prev, ...nextCodingSummary }));
+        setAutosaveStatus("Recovered your saved answers.");
+      })
+      .catch((err) => {
+        console.error("Draft recovery error:", err);
+      });
+  }, [examId, questionBank]);
+
+  const buildAnswersPayload = useCallback(() => {
+    return questionBank.map((question) => {
+      const qId = question.question_id;
+      const type = (question.question_type || "MCQ").toLowerCase();
+      const codingSummary = codingRunSummary[qId] || {};
+      const base = {
+        question_id: qId,
+        question_type: type,
+        section_name: question.section_name || ""
+      };
+      const qIdNum = Number(qId || 0);
+      if (type === "coding") {
+        const selectedLanguage = codingLanguageByQuestion[qIdNum] || DEFAULT_LANGUAGE;
+        const storedAnswer = readAnswer(question, selectedLanguage);
+        const fallbackTotal = parseTestcases(question.testcases).length;
+        return {
+          ...base,
+          code: storedAnswer || "",
+          coding_language: selectedLanguage,
+          testcases_passed: Number(codingSummary.passed || 0),
+          testcases_total: Number(codingSummary.total || fallbackTotal || 0),
+          status: savedQuestions[qId] ? "PASSED" : "RUNNING"
+        };
+      }
+      const storedAnswer = readAnswer(question);
+      if (type === "descriptive") {
+        return {
+          ...base,
+          descriptive_answer: storedAnswer || "",
+          selected_option: ""
+        };
+      }
+      return {
+        ...base,
+        selected_option: storedAnswer || ""
+      };
+    });
+  }, [
+    codingLanguageByQuestion,
+    codingRunSummary,
+    parseTestcases,
+    questionBank,
+    readAnswer,
+    savedQuestions
+  ]);
+
+  useEffect(() => {
     if (!examId) return;
     fetch(`/exam/duration/${examId}`, { credentials: "include" })
       .then(async (res) => {
@@ -432,6 +602,55 @@ export default function Exam() {
         setRemainingSeconds(null);
       });
   }, [examId]);
+
+  useEffect(() => {
+    if (!examId || !questionBank.length) return;
+    if (preExamOpen || submitSuccess || isSubmitting) return;
+
+    const studentId = String(localStorage.getItem("studentId") || "").trim();
+    if (!studentId) return;
+
+    const timer = setInterval(async () => {
+      if (autosaveInFlightRef.current) return;
+      const payloadAnswers = buildAnswersPayload();
+      if (!payloadAnswers.length) return;
+
+      const serializedPayload = JSON.stringify(payloadAnswers);
+      if (serializedPayload === lastAutosavePayloadRef.current) return;
+
+      try {
+        autosaveInFlightRef.current = true;
+        const response = await fetch("/exam/draft/autosave", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            studentId,
+            examId,
+            answers: payloadAnswers
+          })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data?.success) {
+          lastAutosavePayloadRef.current = serializedPayload;
+          setAutosaveStatus("Auto-saved");
+          return;
+        }
+        if (data?.submitted) {
+          setAutosaveStatus("Exam already submitted. Autosave stopped.");
+          return;
+        }
+        setAutosaveStatus("Autosave retrying...");
+      } catch (error) {
+        console.error("Exam autosave error:", error);
+        setAutosaveStatus("Autosave retrying...");
+      } finally {
+        autosaveInFlightRef.current = false;
+      }
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [examId, preExamOpen, submitSuccess, isSubmitting, questionBank, buildAnswersPayload]);
 
   useEffect(() => {
     if (preExamOpen) return;
@@ -687,7 +906,7 @@ export default function Exam() {
     } finally {
       setIsRunningCode(false);
     }
-  }, [codingInput, codingLanguage, currentAnswer, currentQuestion, isRunningCode, logConsole]);
+  }, [codingInput, codingLanguage, codingTestcases, currentAnswer, currentQuestion, isRunningCode, logConsole]);
 
   const handleSectionOverlayClose = () => {
     if (!pendingSection || pendingSectionIndex === null) {
@@ -791,48 +1010,96 @@ export default function Exam() {
     updateAnswer(currentQuestion, nextValue);
   };
 
-  const buildAnswersPayload = () => {
-    return questionBank.map((question) => {
-      const qId = question.question_id;
-      const type = (question.question_type || "MCQ").toLowerCase();
-      const codingSummary = codingRunSummary[qId] || {};
-      const base = {
-        question_id: qId,
-        question_type: type,
-        section_name: question.section_name || ""
-      };
-      const qIdNum = Number(qId || 0);
-      if (type === "coding") {
-        const selectedLanguage = codingLanguageByQuestion[qIdNum] || DEFAULT_LANGUAGE;
-        const storedAnswer = readAnswer(question, selectedLanguage);
-        const fallbackTotal = parseTestcases(question.testcases).length;
-        return {
-          ...base,
-          code: storedAnswer || "",
-          coding_language: selectedLanguage,
-          testcases_passed: Number(codingSummary.passed || 0),
-          testcases_total: Number(codingSummary.total || fallbackTotal || 0),
-          status: savedQuestions[qId] ? "PASSED" : "RUNNING"
-        };
+  const finalizeSubmissionFlow = useCallback(
+    async (messageText) => {
+      await exitFullscreenSafe();
+      setSubmitMessage(messageText || "Exam submitted successfully. Thank you.");
+      setTimeout(() => {
+        navigate("/student/dashboard");
+      }, 1800);
+    },
+    [navigate]
+  );
+
+  const handleSkipFeedback = useCallback(async () => {
+    if (isSavingFeedback) return;
+    const isAuto = Boolean(submittedContext?.autoSubmitted);
+    const autoReason = String(submittedContext?.reason || "").toLowerCase();
+    setFeedbackOpen(false);
+    await finalizeSubmissionFlow(
+      isAuto
+        ? (autoReason === "time_over"
+          ? "Exam auto-submitted because time is over."
+          : strictProctoringEnabled
+            ? "Exam auto-submitted after 3 fullscreen/focus violations."
+            : "Exam auto-submitted due to security violations.")
+        : "Exam submitted successfully. Thank you."
+    );
+  }, [finalizeSubmissionFlow, isSavingFeedback, strictProctoringEnabled, submittedContext]);
+
+  const handleSubmitFeedback = useCallback(async () => {
+    if (isSavingFeedback) return;
+    const content = String(feedbackText || "").trim();
+    if (!content) {
+      setFeedbackError("Please share your feedback before submitting.");
+      return;
+    }
+    if (isFeedbackTooLong) {
+      setFeedbackError("Feedback cannot exceed 100 words.");
+      return;
+    }
+
+    const studentId = Number(submittedContext?.studentId || localStorage.getItem("studentId") || 0);
+    const finalExamId = Number(submittedContext?.examId || 0);
+    if (!studentId || !finalExamId) {
+      setFeedbackError("Missing feedback context. Please try again.");
+      return;
+    }
+
+    setIsSavingFeedback(true);
+    setFeedbackError("");
+    try {
+      const response = await fetch("/exam/feedback", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId,
+          examId: finalExamId,
+          questionText: FEEDBACK_QUESTION,
+          feedbackText: content,
+          submissionMode: submittedContext?.autoSubmitted ? "AUTO_SUBMIT" : "MANUAL"
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data?.success) {
+        setFeedbackError(data?.message || "Could not save feedback. You can Skip and continue.");
+        return;
       }
-      const storedAnswer = readAnswer(question);
-      if (type === "descriptive") {
-        return {
-          ...base,
-          descriptive_answer: storedAnswer || "",
-          selected_option: ""
-        };
-      }
-      return {
-        ...base,
-        selected_option: storedAnswer || ""
-      };
-    });
-  };
+      setFeedbackOpen(false);
+      const isAuto = Boolean(submittedContext?.autoSubmitted);
+      const autoReason = String(submittedContext?.reason || "").toLowerCase();
+      await finalizeSubmissionFlow(
+        isAuto
+          ? (autoReason === "time_over"
+            ? "Exam auto-submitted because time is over."
+            : strictProctoringEnabled
+              ? "Exam auto-submitted after 3 fullscreen/focus violations."
+              : "Exam auto-submitted due to security violations.")
+          : "Exam submitted successfully. Thank you."
+      );
+    } catch (err) {
+      console.error("Save feedback error:", err);
+      setFeedbackError("Could not save feedback. You can Skip and continue.");
+    } finally {
+      setIsSavingFeedback(false);
+    }
+  }, [feedbackText, finalizeSubmissionFlow, isFeedbackTooLong, isSavingFeedback, strictProctoringEnabled, submittedContext]);
 
   const handleConfirmSubmit = useCallback(
     async (options = {}) => {
       const forceSubmit = Boolean(options.force);
+      const forceReason = String(options.forceReason || "").trim().toLowerCase();
       if (isSubmitting) return;
 
       setIsSubmitting(true);
@@ -868,7 +1135,9 @@ export default function Exam() {
           studentId,
           examId,
           studentExamId: studentExamIdParam > 0 ? studentExamIdParam : null,
-          answers: buildAnswersPayload()
+          answers: buildAnswersPayload(),
+          forceSubmit,
+          forceReason: forceReason || null
         };
         const response = await fetch("/exam/submit", {
           method: "POST",
@@ -879,16 +1148,17 @@ export default function Exam() {
         const data = await response.json();
         if (response.ok && data.success) {
           submitCompleted = true;
-          await exitFullscreenSafe();
           setSubmitSuccess(true);
-          setSubmitMessage(
-            forceSubmit
-              ? "Exam auto-submitted after 3 fullscreen/focus violations."
-              : "Exam submitted successfully. Thank you."
-          );
-          setTimeout(() => {
-            navigate("/student/dashboard");
-          }, 1800);
+          setSubmitMessage("");
+          setFeedbackText("");
+          setFeedbackError("");
+          setSubmittedContext({
+            studentId: Number(studentId),
+            examId: Number(data.examId || examId),
+            autoSubmitted: Boolean(data.autoSubmitted || forceSubmit),
+            reason: String(data.reason || forceReason || "")
+          });
+          setFeedbackOpen(true);
         } else {
           setSubmitSuccess(false);
           setSubmitMessage(data.message || "Submission failed. Please try again.");
@@ -898,18 +1168,22 @@ export default function Exam() {
         setSubmitSuccess(false);
         setSubmitMessage(err.message || "Submission failed. Please try again.");
       } finally {
-        if (forceSubmit && !submitCompleted) {
+        if (forceSubmit && !submitCompleted && forceReason === "violation") {
           autoSubmitTriggeredRef.current = false;
+        }
+        if (forceSubmit && !submitCompleted && forceReason === "time_over") {
+          timeAutoSubmitTriggeredRef.current = false;
         }
         setIsSubmitting(false);
         setSubmitConfirmOpen(false);
       }
     },
-    [buildAnswersPayload, examId, isSubmitting, navigate, questionBank, readAnswer, studentExamIdParam]
+    [buildAnswersPayload, examId, isSubmitting, questionBank, readAnswer, studentExamIdParam]
   );
 
   const registerViolation = useCallback(
     (reason) => {
+      if (!strictProctoringEnabled) return;
       if (preExamOpen || isSubmitting || submitSuccess) return;
       const now = Date.now();
       if (now - violationCooldownRef.current < 700) return;
@@ -938,15 +1212,16 @@ export default function Exam() {
       if (typeof window.focus === "function") {
         try {
           window.focus();
-        } catch (_) {
+        } catch {
           /* ignore focus errors */
         }
       }
     },
-    [isSubmitting, preExamOpen, submitSuccess]
+    [isSubmitting, preExamOpen, strictProctoringEnabled, submitSuccess]
   );
 
   useEffect(() => {
+    if (!strictProctoringEnabled) return;
     if (preExamOpen || submitSuccess || isSubmitting) return;
     if (violations < VIOLATION_LIMIT) return;
     if (autoSubmitTriggeredRef.current) return;
@@ -958,28 +1233,51 @@ export default function Exam() {
 
     const submitNow = async () => {
       try {
-        await handleConfirmSubmit({ force: true });
-      } catch (_) {
+        await handleConfirmSubmit({ force: true, forceReason: "violation" });
+      } catch {
         autoSubmitTriggeredRef.current = false;
       }
     };
 
     submitNow();
-  }, [handleConfirmSubmit, isSubmitting, preExamOpen, submitSuccess, violations]);
+  }, [handleConfirmSubmit, isSubmitting, preExamOpen, strictProctoringEnabled, submitSuccess, violations]);
+
+  useEffect(() => {
+    if (preExamOpen || submitSuccess || isSubmitting) return;
+    if (remainingSeconds === null) return;
+    if (remainingSeconds > 0) return;
+    if (timeAutoSubmitTriggeredRef.current) return;
+
+    timeAutoSubmitTriggeredRef.current = true;
+    setSubmitConfirmOpen(false);
+
+    const submitOnTimeOver = async () => {
+      try {
+        await handleConfirmSubmit({ force: true, forceReason: "time_over" });
+      } catch {
+        timeAutoSubmitTriggeredRef.current = false;
+      }
+    };
+
+    submitOnTimeOver();
+  }, [handleConfirmSubmit, isSubmitting, preExamOpen, remainingSeconds, submitSuccess]);
 
   const handleViolationGoFullscreen = useCallback(() => {
-    enterFullscreen();
+    if (strictProctoringEnabled) {
+      enterFullscreen();
+    }
     setViolationWarning((prev) => ({ ...prev, open: false }));
     if (typeof window.focus === "function") {
       try {
         window.focus();
-      } catch (_) {
+      } catch {
         /* ignore focus errors */
       }
     }
-  }, []);
+  }, [strictProctoringEnabled]);
 
   useEffect(() => {
+    if (!strictProctoringEnabled) return;
     if (preExamOpen || submitSuccess || isSubmitting) return;
     const onFullscreenChange = () => {
       const fullscreenActive =
@@ -1004,9 +1302,10 @@ export default function Exam() {
       document.removeEventListener("mozfullscreenchange", onFullscreenChange);
       document.removeEventListener("MSFullscreenChange", onFullscreenChange);
     };
-  }, [isSubmitting, preExamOpen, registerViolation, submitSuccess]);
+  }, [isSubmitting, preExamOpen, registerViolation, strictProctoringEnabled, submitSuccess]);
 
   useEffect(() => {
+    if (!strictProctoringEnabled) return;
     if (preExamOpen) return;
     if (submitSuccess) return;
 
@@ -1085,7 +1384,7 @@ export default function Exam() {
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [preExamOpen, registerViolation, submitSuccess]);
+  }, [preExamOpen, registerViolation, strictProctoringEnabled, submitSuccess]);
 
   const markSaved = (questionId) => {
     if (!questionId) return;
@@ -1339,7 +1638,7 @@ export default function Exam() {
                 <div className="preexam-notices">
                   <h2>Instructions</h2>
                   <ul>
-                    {INSTRUCTIONS.map((rule) => (
+                    {instructionList.map((rule) => (
                       <li key={rule}>{rule}</li>
                     ))}
                   </ul>
@@ -1400,11 +1699,13 @@ export default function Exam() {
                   >
                     Back
                   </button>
-                  <button
-                    type="button"
-                    className="start-btn"
-                    onClick={() => {
-                      enterFullscreen();
+                    <button
+                      type="button"
+                      className="start-btn"
+                      onClick={() => {
+                      if (strictProctoringEnabled) {
+                        enterFullscreen();
+                      }
                       setPreExamOpen(false);
                     }}
                   >
@@ -1474,6 +1775,58 @@ export default function Exam() {
           </div>
         </div>
       )}
+      {feedbackOpen && (
+        <div
+          className="submit-confirm-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="feedback-title"
+          aria-describedby="feedback-body"
+        >
+          <div className="submit-confirm-panel feedback-panel">
+            <div className="feedback-header-row">
+              <span className="feedback-kicker">POST EXAM REVIEW</span>
+              <h2 id="feedback-title">Quick Feedback</h2>
+              <p id="feedback-body">{FEEDBACK_QUESTION}</p>
+            </div>
+            <textarea
+              className="feedback-textarea"
+              value={feedbackText}
+              onChange={(event) => {
+                setFeedbackText(event.target.value || "");
+                if (feedbackError) setFeedbackError("");
+              }}
+              placeholder="Share your feedback..."
+              maxLength={900}
+            />
+            <div className="feedback-meta-row">
+              <p className={`feedback-counter ${isFeedbackTooLong ? "error" : ""}`}>
+                {feedbackWordCount}/100 words
+              </p>
+              <p className="feedback-meta-hint">Tip: mention question quality and difficulty level.</p>
+            </div>
+            {feedbackError ? <p className="feedback-error">{feedbackError}</p> : null}
+            <div className="submit-confirm-actions feedback-actions">
+              <button
+                type="button"
+                className="nav-btn secondary"
+                onClick={handleSkipFeedback}
+                disabled={isSavingFeedback}
+              >
+                Skip
+              </button>
+              <button
+                type="button"
+                className="nav-btn primary"
+                onClick={handleSubmitFeedback}
+                disabled={isSavingFeedback || isFeedbackTooLong}
+              >
+                {isSavingFeedback ? "Saving..." : "Submit Feedback"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {(isSubmitting || submitMessage) && (
         <div className="submit-feedback-overlay" role="alertdialog" aria-modal="true" aria-labelledby="submit-feedback-title">
           <div className={`submit-feedback-panel ${isSubmitting ? "success" : submitSuccess ? "success" : "error"}`}>
@@ -1497,7 +1850,7 @@ export default function Exam() {
           </div>
         </div>
       )}
-      {violationWarning.open && !submitSuccess && (
+      {strictProctoringEnabled && violationWarning.open && !submitSuccess && (
         <div
           className="violation-warning-overlay"
           role="alertdialog"
@@ -1533,12 +1886,12 @@ export default function Exam() {
           <div className="chip">
             <span>Violations</span>
             <strong>
-              {violations}/{VIOLATION_LIMIT}
+              {strictProctoringEnabled ? `${violations}/${VIOLATION_LIMIT}` : "N/A"}
             </strong>
           </div>
           <div className="chip subtle">
             <span>Fullscreen</span>
-            <strong>{isFullscreen ? "On" : "Off"}</strong>
+            <strong>{strictProctoringEnabled ? (isFullscreen ? "On" : "Off") : "Not Required"}</strong>
           </div>
           <div className="chip subtle">
             <span>Total marks</span>
@@ -1752,6 +2105,11 @@ export default function Exam() {
                       Save
                     </button>
                     <span className="save-indicator">{isCurrentSaved ? "Saved" : ""}</span>
+                  </div>
+                )}
+                {autosaveStatus && (
+                  <div className="save-row">
+                    <span className="save-indicator">{autosaveStatus}</span>
                   </div>
                 )}
               </div>

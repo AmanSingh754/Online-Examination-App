@@ -4,6 +4,7 @@ import useBodyClass from "../hooks/useBodyClass.js";
 function Register() {
   useBodyClass("landing-page student-landing auth-page");
   const [notice, setNotice] = useState("");
+  const [isRegistering, setIsRegistering] = useState(false);
   const [colleges, setColleges] = useState([]);
   const [collegeError, setCollegeError] = useState("");
   const [formState, setFormState] = useState({
@@ -41,6 +42,7 @@ function Register() {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (isRegistering) return;
     setNotice("");
 
     if (!formState.name || !formState.email || !formState.phone || !formState.dob || !formState.course || !formState.collegeId || !formState.password) {
@@ -49,6 +51,7 @@ function Register() {
     }
 
     try {
+      setIsRegistering(true);
       const response = await fetch("/student/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -81,6 +84,8 @@ function Register() {
     } catch (err) {
       console.error("Registration error:", err);
       setNotice("Server error during registration.");
+    } finally {
+      setIsRegistering(false);
     }
   };
 
@@ -180,7 +185,9 @@ function Register() {
               onChange={(event) => setFormState({ ...formState, password: event.target.value })}
               required
             />
-            <button type="submit">Register</button>
+            <button type="submit" disabled={isRegistering}>
+              {isRegistering ? "Registering..." : "Register"}
+            </button>
           </form>
           {notice && <p className="auth-help">{notice}</p>}
           {!notice && (
