@@ -25,8 +25,8 @@ function Home() {
             <p className="hero-eyebrow">RP2 Scholarship Examination Application</p>
             <h1>Start your scholarship journey with one trusted portal.</h1>
             <p className="hero-subtitle">
-              View eligibility, register for the exam, and track your results without delay.
-              Built for students who want clarity from registration to selection.
+              Access your regular exam account, track your exam schedule, and review results from one portal.
+              Student accounts are provisioned directly by admin.
             </p>
             <div className="hero-actions">
               <a className="button-primary" href="/student/login">Login as Student</a>

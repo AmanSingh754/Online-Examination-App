@@ -8,8 +8,17 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.log
+*.err.log
 
 # OS / Editor files
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Build output
+dist/
+frontend-react/dist/
+
+# Local archives
+*.zip

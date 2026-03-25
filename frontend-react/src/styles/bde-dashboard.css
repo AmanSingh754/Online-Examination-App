@@ -308,8 +308,25 @@
   background: rgba(28, 32, 50, 0.92);
 }
 
+.bde-dashboard .dashboard-section tbody tr.student-row-inactive,
+.bde-dashboard .dashboard-section tbody tr.student-row-inactive:nth-child(even) {
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.bde-dashboard .dashboard-section tbody tr.student-row-inactive td {
+  background: rgba(239, 68, 68, 0.14);
+}
+
 .bde-dashboard .dashboard-section tbody tr:hover {
   background: rgba(113, 119, 242, 0.2);
+}
+
+.bde-dashboard .dashboard-section tbody tr.student-row-inactive:hover {
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.bde-dashboard .dashboard-section tbody tr.student-row-inactive:hover td {
+  background: rgba(239, 68, 68, 0.2);
 }
 
 .bde-dashboard .dashboard-section td {

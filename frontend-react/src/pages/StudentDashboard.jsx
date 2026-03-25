@@ -13,6 +13,10 @@ function StudentDashboard() {
   const studentDob = localStorage.getItem("studentDob");
   const studentCourse = localStorage.getItem("studentCourse");
   const studentCollegeName = localStorage.getItem("studentCollegeName");
+  const studentType = String(localStorage.getItem("studentType") || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]/g, "_");
 
   const [availableExams, setAvailableExams] = useState([]);
   const [attemptedExams, setAttemptedExams] = useState([]);
@@ -21,7 +25,14 @@ function StudentDashboard() {
   const isWalkinDashboard = [...availableExams, ...attemptedExams].some((exam) =>
     /walk[\s-]*in/i.test(String(exam?.exam_name || ""))
   );
+  const isWalkinStudent =
+    studentType === "WALKIN" || studentType === "WALK_IN" || isWalkinDashboard;
   const courseLabel = isWalkinDashboard ? "Specialization" : "Course";
+
+  useEffect(() => {
+    if (![...availableExams, ...attemptedExams].length) return;
+    localStorage.setItem("studentType", isWalkinDashboard ? "WALK_IN" : "REGULAR");
+  }, [attemptedExams, availableExams, isWalkinDashboard]);
 
   const loadAvailableExams = useCallback(async () => {
     try {
@@ -75,13 +86,16 @@ function StudentDashboard() {
     if (startingExamId !== null) return;
     setStartingExamId(examId);
     try {
-      const response = await fetch(`/exam/attempted/${studentId}/${examId}`);
+      const endpointBase = isWalkinStudent ? "/exam" : "/exam/regular";
+      const response = await fetch(`${endpointBase}/attempted/${studentId}/${examId}`, {
+        credentials: "include"
+      });
       const data = await response.json();
       if (data.attempted) {
         alert("You have already attempted this exam.");
         return;
       }
-      const startResponse = await fetch("/exam/start", {
+      const startResponse = await fetch(`${endpointBase}/start`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -99,6 +113,10 @@ function StudentDashboard() {
           if (minutes > 0 || hours > 0) parts.push(`${minutes} min`);
           parts.push(`${seconds} sec`);
           alert(`Exam has not started yet. ${parts.join(" ")} left.`);
+          return;
+        }
+        if (String(startData?.code || "") === "exam_start_window_closed") {
+          alert("The 10-minute start window has closed. You can no longer attend this regular exam.");
           return;
         }
         alert(startData.message || "Unable to start exam.");
@@ -127,6 +145,7 @@ function StudentDashboard() {
         localStorage.removeItem("studentDob");
         localStorage.removeItem("studentCourse");
         localStorage.removeItem("studentCollegeName");
+        localStorage.removeItem("studentType");
         navigate("/student/login");
       });
   };

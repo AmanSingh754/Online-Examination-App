@@ -10,6 +10,7 @@ const db = require("./db");
 
 const studentRoutes = require("./routes/student.routes");
 const examRoutes = require("./routes/exam.routes");
+const regularExamRoutes = require("./routes/regularExam.routes");
 const adminRoutes = require("./routes/admin.routes");
 
 const app = express();
@@ -229,6 +230,7 @@ if (hasReactBuild) {
 
 /* ROUTES */
 app.use("/student", studentRoutes);
+app.use("/exam/regular", regularExamRoutes);
 app.use("/exam", examRoutes);
 app.use("/admin", adminRoutes);
 

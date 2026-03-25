@@ -49,6 +49,35 @@ const countWords = (text) =>
     .split(/\s+/)
     .filter(Boolean).length;
 
+const normalizeRegularTiming = (timing) => {
+  if (!timing || typeof timing !== "object") return null;
+  const startAtMs = new Date(timing.startAt || "").getTime();
+  const questionUnlockAtMs = new Date(timing.questionUnlockAt || "").getTime();
+  const submissionDeadlineAtMs = new Date(timing.submissionDeadlineAt || "").getTime();
+  if (!Number.isFinite(startAtMs) || !Number.isFinite(questionUnlockAtMs) || !Number.isFinite(submissionDeadlineAtMs)) {
+    return null;
+  }
+  const nowMs = Date.now();
+  const instructionWindowActive = nowMs >= startAtMs && nowMs < questionUnlockAtMs;
+  const questionsVisible = nowMs >= questionUnlockAtMs;
+  const submissionClosed = nowMs > submissionDeadlineAtMs;
+  return {
+    ...timing,
+    startAtMs,
+    questionUnlockAtMs,
+    submissionDeadlineAtMs,
+    instructionWindowActive,
+    questionsVisible,
+    submissionClosed,
+    startsInSeconds: nowMs < startAtMs ? Math.max(0, Math.ceil((startAtMs - nowMs) / 1000)) : 0,
+    unlockInSeconds: instructionWindowActive ? Math.max(0, Math.ceil((questionUnlockAtMs - nowMs) / 1000)) : 0,
+    remainingQuestionSeconds:
+      nowMs >= questionUnlockAtMs && nowMs <= submissionDeadlineAtMs
+        ? Math.max(0, Math.ceil((submissionDeadlineAtMs - nowMs) / 1000))
+        : 0
+  };
+};
+
 const getSectionInstruction = (sectionName) => {
   if (!sectionName) {
     return {
@@ -131,6 +160,12 @@ export default function Exam() {
   const [params] = useSearchParams();
   const examId = params.get("examId");
   const studentExamIdParam = Number(params.get("studentExamId") || 0);
+  const storedStudentType = String(localStorage.getItem("studentType") || "REGULAR")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]/g, "_");
+  const isWalkinExamSession = storedStudentType === "WALKIN" || storedStudentType === "WALK_IN";
+  const examApiBase = isWalkinExamSession ? "/exam" : "/exam/regular";
 
   const [questionBank, setQuestionBank] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -179,9 +214,11 @@ export default function Exam() {
   const [descriptiveLimitMessage, setDescriptiveLimitMessage] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(null);
   const [remainingSeconds, setRemainingSeconds] = useState(null);
+  const [regularTiming, setRegularTiming] = useState(null);
   const isIOS = isIOSPlatform();
   const fullscreenSupported = hasFullscreenSupport();
   const strictProctoringEnabled = !isIOS && fullscreenSupported;
+  const questionsLoadedRef = useRef(false);
   const instructionList = useMemo(
     () => [
       ...INSTRUCTIONS,
@@ -200,6 +237,12 @@ export default function Exam() {
   const focusLossActiveRef = useRef(false);
   const fullscreenViolationActiveRef = useRef(false);
   const securityNoticeTimeoutRef = useRef(null);
+  const isRegularInstructionPhase = !isWalkinExamSession && Boolean(regularTiming?.instructionWindowActive);
+  const isRegularQuestionPhase = !isWalkinExamSession && Boolean(regularTiming?.questionsVisible) && !regularTiming?.submissionClosed;
+  const headerTimerLabel = isRegularInstructionPhase ? "Questions unlock in" : "Time left";
+  const headerTimerSeconds = isRegularInstructionPhase
+    ? Number(regularTiming?.unlockInSeconds || 0)
+    : remainingSeconds;
 
   useEffect(() => {
     return () => {
@@ -367,9 +410,14 @@ export default function Exam() {
       sectionNames,
       breakdown,
       optionCount: 4,
-      durationLabel: durationMinutes ? `${durationMinutes} minutes` : "As configured by admin"
+      durationLabel:
+        !isWalkinExamSession && regularTiming
+          ? `${regularTiming.startGraceMinutes || 10} minutes instructions + ${durationMinutes || regularTiming.questionDurationMinutes || 60} minutes questions`
+          : durationMinutes
+            ? `${durationMinutes} minutes`
+            : "As configured by admin"
     };
-  }, [questionBank, durationMinutes]);
+  }, [durationMinutes, isWalkinExamSession, questionBank, regularTiming]);
 
   const currentSectionProgress = useMemo(() => {
     if (!currentSection || !currentQuestion) {
@@ -425,18 +473,45 @@ export default function Exam() {
       return;
     }
 
+    if (questionsLoadedRef.current && questionBank.length) {
+      setLoading(false);
+      return;
+    }
+
+    if (!isWalkinExamSession && (!regularTiming || !regularTiming.questionsVisible)) {
+      setLoading(false);
+      setError("");
+      return;
+    }
+
     const controller = new AbortController();
     setLoading(true);
 
-    fetch(`/exam/regular_exam_questions/${examId}`, { credentials: "include", signal: controller.signal })
+    const questionsEndpoint = isWalkinExamSession
+      ? `/exam/regular_exam_questions/${examId}`
+      : `${examApiBase}/questions/${examId}`;
+
+    fetch(questionsEndpoint, { credentials: "include", signal: controller.signal })
       .then(async (res) => {
         const data = await res.json().catch(() => null);
         if (!res.ok) {
+          if (!isWalkinExamSession && String(data?.code || "") === "instruction_window_active") {
+            setRegularTiming((prev) =>
+              normalizeRegularTiming({
+                ...(prev || {}),
+                questionUnlockAt: data?.questionUnlockAt || prev?.questionUnlockAt
+              })
+            );
+            return null;
+          }
           throw new Error(data?.message || `Unable to load questions (${res.status})`);
         }
         return data;
       })
       .then((data) => {
+        if (data === null) {
+          return;
+        }
         if (!Array.isArray(data)) {
           setError(String(data?.message || "Invalid questions payload."));
           return;
@@ -445,6 +520,7 @@ export default function Exam() {
           setError("No questions found for your assigned exam stream.");
           return;
         }
+        questionsLoadedRef.current = true;
         setQuestionBank(data);
       })
       .catch((err) => {
@@ -456,7 +532,7 @@ export default function Exam() {
       .finally(() => setLoading(false));
 
     return () => controller.abort();
-  }, [examId]);
+  }, [examApiBase, examId, isWalkinExamSession, questionBank.length, regularTiming]);
 
   useEffect(() => {
     if (!examId || !questionBank.length) return;
@@ -467,7 +543,7 @@ export default function Exam() {
       questionBank.map((question) => [Number(question?.question_id || 0), question])
     );
 
-    fetch(`/exam/draft/${examId}`, { credentials: "include" })
+    fetch(`${examApiBase}/draft/${examId}`, { credentials: "include" })
       .then(async (res) => {
         const data = await res.json().catch(() => null);
         if (!res.ok || !data?.success) return null;
@@ -529,7 +605,7 @@ export default function Exam() {
       .catch((err) => {
         console.error("Draft recovery error:", err);
       });
-  }, [examId, questionBank]);
+  }, [examApiBase, examId, questionBank]);
 
   const buildAnswersPayload = useCallback(() => {
     return questionBank.map((question) => {
@@ -579,7 +655,7 @@ export default function Exam() {
 
   useEffect(() => {
     if (!examId) return;
-    fetch(`/exam/duration/${examId}`, { credentials: "include" })
+    fetch(`${examApiBase}/duration/${examId}`, { credentials: "include" })
       .then(async (res) => {
         const data = await res.json().catch(() => null);
         if (!res.ok) {
@@ -591,16 +667,35 @@ export default function Exam() {
         const duration = Number(data?.durationMinutes || 0);
         if (duration > 0) {
           setDurationMinutes(duration);
-          setRemainingSeconds(duration * 60);
+          if (isWalkinExamSession) {
+            setRemainingSeconds(duration * 60);
+            setRegularTiming(null);
+          } else {
+            const timing = normalizeRegularTiming(data?.timing);
+            setRegularTiming(timing);
+            setRemainingSeconds(timing?.questionsVisible ? Number(timing?.remainingQuestionSeconds || 0) : null);
+          }
         } else {
           setDurationMinutes(null);
           setRemainingSeconds(null);
+          if (!isWalkinExamSession) {
+            setRegularTiming(normalizeRegularTiming(data?.timing));
+          }
         }
       })
       .catch(() => {
         setDurationMinutes(null);
         setRemainingSeconds(null);
+        if (!isWalkinExamSession) {
+          setRegularTiming(null);
+        }
       });
+  }, [examApiBase, examId, isWalkinExamSession]);
+
+  useEffect(() => {
+    questionsLoadedRef.current = false;
+    setQuestionBank([]);
+    setCurrentIndex(0);
   }, [examId]);
 
   useEffect(() => {
@@ -620,7 +715,7 @@ export default function Exam() {
 
       try {
         autosaveInFlightRef.current = true;
-        const response = await fetch("/exam/draft/autosave", {
+        const response = await fetch(`${examApiBase}/draft/autosave`, {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
@@ -650,20 +745,32 @@ export default function Exam() {
     }, 5000);
 
     return () => clearInterval(timer);
-  }, [examId, preExamOpen, submitSuccess, isSubmitting, questionBank, buildAnswersPayload]);
+  }, [examApiBase, examId, preExamOpen, submitSuccess, isSubmitting, questionBank, buildAnswersPayload]);
 
   useEffect(() => {
-    if (preExamOpen) return;
-    if (remainingSeconds === null) return;
-    if (remainingSeconds <= 0) return;
-    const timer = setInterval(() => {
-      setRemainingSeconds((prev) => {
-        if (prev === null) return prev;
-        return prev > 0 ? prev - 1 : 0;
-      });
-    }, 1000);
+    if (isWalkinExamSession) {
+      if (preExamOpen) return;
+      if (remainingSeconds === null) return;
+      if (remainingSeconds <= 0) return;
+      const timer = setInterval(() => {
+        setRemainingSeconds((prev) => {
+          if (prev === null) return prev;
+          return prev > 0 ? prev - 1 : 0;
+        });
+      }, 1000);
+      return () => clearInterval(timer);
+    }
+
+    if (!regularTiming) return;
+    const tick = () => {
+      const next = normalizeRegularTiming(regularTiming);
+      setRegularTiming(next);
+      setRemainingSeconds(next?.questionsVisible ? Number(next?.remainingQuestionSeconds || 0) : null);
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [preExamOpen, remainingSeconds]);
+  }, [isWalkinExamSession, preExamOpen, regularTiming, remainingSeconds]);
 
   useEffect(() => {
     if (preExamOpen) return;
@@ -1059,7 +1166,7 @@ export default function Exam() {
     setIsSavingFeedback(true);
     setFeedbackError("");
     try {
-      const response = await fetch("/exam/feedback", {
+      const response = await fetch(`${examApiBase}/feedback`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -1094,7 +1201,7 @@ export default function Exam() {
     } finally {
       setIsSavingFeedback(false);
     }
-  }, [feedbackText, finalizeSubmissionFlow, isFeedbackTooLong, isSavingFeedback, strictProctoringEnabled, submittedContext]);
+  }, [examApiBase, feedbackText, finalizeSubmissionFlow, isFeedbackTooLong, isSavingFeedback, strictProctoringEnabled, submittedContext]);
 
   const handleConfirmSubmit = useCallback(
     async (options = {}) => {
@@ -1139,7 +1246,7 @@ export default function Exam() {
           forceSubmit,
           forceReason: forceReason || null
         };
-        const response = await fetch("/exam/submit", {
+        const response = await fetch(`${examApiBase}/submit`, {
           method: "POST",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
@@ -1178,7 +1285,7 @@ export default function Exam() {
         setSubmitConfirmOpen(false);
       }
     },
-    [buildAnswersPayload, examId, isSubmitting, questionBank, readAnswer, studentExamIdParam]
+    [buildAnswersPayload, examApiBase, examId, isSubmitting, questionBank, readAnswer, studentExamIdParam]
   );
 
   const registerViolation = useCallback(
@@ -1243,7 +1350,7 @@ export default function Exam() {
   }, [handleConfirmSubmit, isSubmitting, preExamOpen, strictProctoringEnabled, submitSuccess, violations]);
 
   useEffect(() => {
-    if (preExamOpen || submitSuccess || isSubmitting) return;
+    if ((preExamOpen && isWalkinExamSession) || submitSuccess || isSubmitting) return;
     if (remainingSeconds === null) return;
     if (remainingSeconds > 0) return;
     if (timeAutoSubmitTriggeredRef.current) return;
@@ -1260,7 +1367,7 @@ export default function Exam() {
     };
 
     submitOnTimeOver();
-  }, [handleConfirmSubmit, isSubmitting, preExamOpen, remainingSeconds, submitSuccess]);
+  }, [handleConfirmSubmit, isSubmitting, isWalkinExamSession, preExamOpen, remainingSeconds, submitSuccess]);
 
   const handleViolationGoFullscreen = useCallback(() => {
     if (strictProctoringEnabled) {
@@ -1897,15 +2004,15 @@ export default function Exam() {
             <span>Total marks</span>
             <strong>50</strong>
           </div>
-          {durationMinutes ? (
+          {durationMinutes || isRegularInstructionPhase ? (
             <div className="chip subtle">
-              <span>Time left</span>
-              <strong>{formatTimer(remainingSeconds)}</strong>
+              <span>{headerTimerLabel}</span>
+              <strong>{formatTimer(headerTimerSeconds)}</strong>
             </div>
           ) : null}
           <div className="chip subtle">
             <span>Total Question</span>
-            <strong>= {questionBank.length || "--"}</strong>
+            <strong>= {questionBank.length || (isRegularInstructionPhase ? "--" : "--")}</strong>
           </div>
         </div>
         <div className="header-actions">
@@ -1913,9 +2020,13 @@ export default function Exam() {
             type="button"
             className="submit-btn"
             onClick={() => setSubmitConfirmOpen(true)}
-            disabled={remainingSeconds !== null && remainingSeconds <= 0}
+            disabled={isRegularInstructionPhase || (remainingSeconds !== null && remainingSeconds <= 0)}
           >
-            {remainingSeconds !== null && remainingSeconds <= 0 ? "Time Over" : "Submit Exam"}
+            {isRegularInstructionPhase
+              ? "Questions Locked"
+              : remainingSeconds !== null && remainingSeconds <= 0
+                ? "Time Over"
+                : "Submit Exam"}
           </button>
         </div>
       </div>
@@ -1929,7 +2040,7 @@ export default function Exam() {
           {securityNotice}
         </div>
       )}
-      {currentSection && (
+      {currentSection && questionBank.length > 0 && (
         <div className="section-banner-outside">
           {sectionNavigator.sections.length > 0 && (
             <select
@@ -2058,6 +2169,15 @@ export default function Exam() {
                 </>
               )}
               {loading && <p className="status-text">Loading exam content...</p>}
+              {!loading && isRegularInstructionPhase && (
+                <div className="status-text">
+                  <strong>Instruction window is active.</strong>
+                  <br />
+                  You have entered the exam successfully. Questions will unlock in {formatTimer(regularTiming?.unlockInSeconds || 0)}.
+                  <br />
+                  Late starts close at {new Date(regularTiming?.lateStartDeadlineAt || "").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) || "--:--"} and submission will auto-close at {new Date(regularTiming?.submissionDeadlineAt || "").toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) || "--:--"}.
+                </div>
+              )}
               {!loading && error && <p className="status-text error-text">{error}</p>}
               <div className="question-actions">
                 <div className="nav-buttons">
@@ -2065,7 +2185,7 @@ export default function Exam() {
                     type="button"
                     className="nav-btn secondary"
                     onClick={handlePrevious}
-                    disabled={currentIndex === 0 || sectionOverlayOpen}
+                    disabled={isRegularInstructionPhase || currentIndex === 0 || sectionOverlayOpen}
                   >
                     Previous
                   </button>
@@ -2080,7 +2200,7 @@ export default function Exam() {
                           handleNext();
                         }
                       }}
-                      disabled={currentIndex >= questionBank.length - 1 || sectionOverlayOpen}
+                      disabled={isRegularInstructionPhase || currentIndex >= questionBank.length - 1 || sectionOverlayOpen}
                     >
                       Next
                     </button>
@@ -2089,7 +2209,7 @@ export default function Exam() {
                       type="button"
                       className="nav-btn primary"
                       onClick={handleNext}
-                      disabled={currentIndex >= questionBank.length - 1 || sectionOverlayOpen}
+                      disabled={isRegularInstructionPhase || currentIndex >= questionBank.length - 1 || sectionOverlayOpen}
                     >
                       Next
                     </button>

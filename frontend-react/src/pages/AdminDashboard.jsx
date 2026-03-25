@@ -2,24 +2,38 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 
-const REGULAR_COURSES = [
-  "Other Tech",
+const TECH_REGULAR_COURSES = [
+  "BTech",
+  "BTech CS",
+  "BTech IT",
+  "MTech",
+  "MTech IT",
+  "MTech CS",
   "BCA",
   "BSc CS",
   "BSc IT",
   "MCA",
-  "MTech IT",
-  "MTech CS",
-  "BTech CS",
-  "Other Non-Tech",
+  "MSc IT",
+  "MSc CS",
+  "Other Tech"
+];
+
+const NON_TECH_REGULAR_COURSES = [
+  "BA",
+  "MA",
   "BBA",
+  "BCom",
   "MBA",
+  "MCom",
+  "BSc Agriculture",
   "BSc Physics",
+  "BSc Chemistry",
   "MSc Physics",
   "MSc Chemistry",
-  "MCom",
-  "BCom"
+  "Other Non-Tech"
 ];
+
+const REGULAR_COURSES = [...TECH_REGULAR_COURSES, ...NON_TECH_REGULAR_COURSES];
 
 const WALKIN_STREAMS = ["Data Science", "Data Analytics", "MERN"]
 const WALKIN_OPTION_KEYS = [
@@ -42,13 +56,50 @@ const getRegularBackgroundType = (courseValue) => {
   if (!normalized) return "";
   if (normalized === "other tech") return "TECH";
   if (normalized === "other non tech") return "NON_TECH";
-  if (["bca", "bsc cs", "bsc it", "mca", "mtech it", "mtech cs", "btech cs"].includes(normalized)) {
+  if ([
+    "btech",
+    "btech cs",
+    "btech it",
+    "mtech",
+    "mtech it",
+    "mtech cs",
+    "bca",
+    "bsc cs",
+    "bsc computer science",
+    "bsc it",
+    "mca",
+    "msc it",
+    "msc cs",
+    "msc computer science"
+  ].includes(normalized)) {
     return "TECH";
   }
-  if (["bba", "mba", "bsc physics", "msc physics", "msc chemistry", "mcom", "bcom", "bsc phy", "msc phy", "msc che"].includes(normalized)) {
+  if ([
+    "ba",
+    "ma",
+    "bba",
+    "bcom",
+    "mba",
+    "mcom",
+    "bsc physics",
+    "bsc chemistry",
+    "bsc agriculture",
+    "msc physics",
+    "msc chemistry",
+    "bsc phy",
+    "msc phy",
+    "msc che"
+  ].includes(normalized)) {
     return "NON_TECH";
   }
   return "";
+};
+
+const getRegularCoursesByBackground = (background) => {
+  const normalized = String(background || "").trim().toUpperCase();
+  if (normalized === "TECH") return TECH_REGULAR_COURSES;
+  if (normalized === "NON_TECH") return NON_TECH_REGULAR_COURSES;
+  return [];
 };
 
 const formatIST24 = (value) => {
@@ -408,12 +459,10 @@ function AdminDashboard() {
   const [showProfile, setShowProfile] = useState(false);
   const [activeSection, setActiveSection] = useState("dashboard");
 
-  const [cutoff, setCutoff] = useState("");
   const [scheduleStartDate, setScheduleStartDate] = useState("");
   const [scheduleStartTime, setScheduleStartTime] = useState("");
+  const [scheduleCollegeId, setScheduleCollegeId] = useState("");
 
-  const [courseSelect, setCourseSelect] = useState("");
-  const [customCourse, setCustomCourse] = useState("");
   const [walkinForm, setWalkinForm] = useState({
     name: "",
     email: "",
@@ -438,7 +487,7 @@ function AdminDashboard() {
   const [walkinSheetSectionTab, setWalkinSheetSectionTab] = useState("aptitude");
   const [walkinSheetLoading, setWalkinSheetLoading] = useState(false);
   const [walkinSheetError, setWalkinSheetError] = useState("");
-  const [regularQuestionCourse, setRegularQuestionCourse] = useState("");
+  const [regularQuestionSectionTab, setRegularQuestionSectionTab] = useState("aptitude");
   const [regularQuestionSheetData, setRegularQuestionSheetData] = useState(null);
   const [regularQuestionSheetLoading, setRegularQuestionSheetLoading] = useState(false);
   const [regularQuestionSheetError, setRegularQuestionSheetError] = useState("");
@@ -460,6 +509,22 @@ function AdminDashboard() {
   });
   const [walkinQuestionEditSaving, setWalkinQuestionEditSaving] = useState(false);
   const [walkinQuestionEditStatus, setWalkinQuestionEditStatus] = useState("");
+  const [regularQuestionEditor, setRegularQuestionEditor] = useState({
+    open: false,
+    category: "",
+    questionId: 0,
+    questionType: "MCQ",
+    sectionName: "",
+    backgroundType: "",
+    questionText: "",
+    optionA: "",
+    optionB: "",
+    optionC: "",
+    optionD: "",
+    correctOption: "A"
+  });
+  const [regularQuestionEditSaving, setRegularQuestionEditSaving] = useState(false);
+  const [regularQuestionEditStatus, setRegularQuestionEditStatus] = useState("");
   const [walkinResults, setWalkinResults] = useState(null);
   const [walkinResultsLoading, setWalkinResultsLoading] = useState(false);
   const [walkinResultsError, setWalkinResultsError] = useState("");
@@ -512,6 +577,7 @@ function AdminDashboard() {
     email: "",
     phone: "",
     dob: "",
+    background: "",
     course: "",
     collegeId: "",
     password: ""
@@ -519,7 +585,6 @@ function AdminDashboard() {
   const [regularStatus, setRegularStatus] = useState("");
   const [regularCredentials, setRegularCredentials] = useState(null);
   const [regularCreateSubmitting, setRegularCreateSubmitting] = useState(false);
-  const [regularCollegeSearch, setRegularCollegeSearch] = useState("");
   const [collegeOptions, setCollegeOptions] = useState([]);
   const [collegeError, setCollegeError] = useState("");
   const [bdeOptions, setBdeOptions] = useState([]);
@@ -562,6 +627,27 @@ function AdminDashboard() {
           ) : null;
         }
         )}
+      </div>
+    );
+  };
+
+  const renderRegularQuestionSheetOptions = (item) => {
+    const hasOptions = WALKIN_OPTION_KEYS.some(({ key }) => item[key]);
+    if (!hasOptions) return null;
+    const correctOption = String(item?.correct_answer || item?.correct_option || "").trim().toUpperCase();
+    return (
+      <div className="walkin-options">
+        {WALKIN_OPTION_KEYS.map(({ key, label }) => {
+          const normalizedLabel = String(label || "").trim().toUpperCase();
+          const isCorrect = Boolean(correctOption) && correctOption === normalizedLabel;
+          return item[key] ? (
+            <p className={`item-option ${isCorrect ? "option-correct-answer" : ""}`.trim()} key={key}>
+              <span className="option-label">{label}.</span>
+              <span className="option-text">{item[key]}</span>
+              {isCorrect ? <span className="option-result-badge">Correct</span> : null}
+            </p>
+          ) : null;
+        })}
       </div>
     );
   };
@@ -1000,6 +1086,7 @@ function AdminDashboard() {
     const trimmedEmail = regularForm.email.trim();
     const trimmedPhone = regularForm.phone.trim();
     const trimmedDob = regularForm.dob.trim();
+    const trimmedBackground = regularForm.background.trim();
     const trimmedCourse = regularForm.course.trim();
     const passwordValue = regularForm.password;
     const selectedCollegeId = regularForm.collegeId;
@@ -1009,6 +1096,7 @@ function AdminDashboard() {
       !trimmedEmail ||
       !trimmedPhone ||
       !trimmedDob ||
+      !trimmedBackground ||
       !trimmedCourse ||
       !passwordValue ||
       !selectedCollegeId
@@ -1038,7 +1126,7 @@ function AdminDashboard() {
         return;
       }
 
-      setRegularStatus("Regular student created. Credentials are now active.");
+      setRegularStatus(`Regular student created. Background: ${trimmedBackground || "--"}. Credentials are now active.`);
       setRegularCredentials(data.credentials);
       if (selectedCollegeId && selectedCollegeId !== collegeId) {
         setSelectedCollegeId(selectedCollegeId);
@@ -1050,6 +1138,7 @@ function AdminDashboard() {
         email: "",
         phone: "",
         dob: "",
+        background: "",
         course: "",
         password: ""
       }));
@@ -1084,21 +1173,19 @@ function AdminDashboard() {
     if (examCreateSubmitting) return;
     setExamScheduleStatus("");
 
-    const payload = {};
-
-    const course = courseSelect === "OTHER" ? customCourse.trim() : courseSelect;
-    if (!course) {
-      alert("Select a course for regular exam");
-      return;
-    }
     if (!scheduleStartDate || !scheduleStartTime) {
       alert("Select start date/time");
       return;
     }
-    payload.course = course;
-    payload.startDate = scheduleStartDate;
-    payload.startTime = scheduleStartTime;
-    payload.cutoff = cutoff;
+    if (!String(scheduleCollegeId || "").trim()) {
+      alert("Select a college");
+      return;
+    }
+    const payload = {
+      startDate: scheduleStartDate,
+      startTime: scheduleStartTime,
+      collegeId: String(scheduleCollegeId || "").trim()
+    };
 
     try {
       setExamCreateSubmitting(true);
@@ -1113,11 +1200,9 @@ function AdminDashboard() {
       if (!response.ok || !data.success) {
         throw new Error(data.message || "Could not save exam schedule");
       }
-      setCourseSelect("");
-      setCustomCourse("");
       setScheduleStartDate("");
       setScheduleStartTime("");
-      setCutoff("");
+      setScheduleCollegeId("");
       setEditingExamId(null);
       await loadExams();
       setExamScheduleStatus(isEditing ? "Schedule updated successfully." : "Schedule saved successfully.");
@@ -1131,61 +1216,20 @@ function AdminDashboard() {
   };
 
   const handleEditExam = (exam) => {
-    const courseValue = String(exam?.course || "").trim();
-    const isKnownCourse = REGULAR_COURSES.includes(courseValue);
     setEditingExamId(Number(exam?.exam_id || 0) || null);
-    setCourseSelect(isKnownCourse ? courseValue : "OTHER");
-    setCustomCourse(isKnownCourse ? "" : courseValue);
     setScheduleStartDate(toISTDateInput(exam?.start_at));
     setScheduleStartTime(toISTTimeInput(exam?.start_at));
-    setCutoff(exam?.cutoff === null || exam?.cutoff === undefined ? "" : String(exam.cutoff));
+    setScheduleCollegeId(String(exam?.college_id || ""));
     setExamScheduleStatus(`Editing exam #${exam?.exam_id || ""}. Update fields and click Save Schedule.`);
-  };
-
-  const handleToggleExamStatus = async (exam) => {
-    const examId = Number(exam?.exam_id || 0);
-    if (!examId) return;
-    const currentStatus = normalizeExamStatus(exam?.exam_status);
-    const nextStatus = currentStatus === "READY" ? "DRAFT" : "READY";
-    const confirmed = await openConfirmDialog({
-      title: nextStatus === "READY" ? "Activate this exam?" : "Deactivate this exam?",
-      message:
-        nextStatus === "READY"
-          ? "Students will be able to start this exam within its schedule window."
-          : "Students will not be able to start this exam while it is deactivated.",
-      confirmLabel: nextStatus === "READY" ? "Activate" : "Deactivate",
-      tone: nextStatus === "READY" ? "default" : "warning"
-    });
-    if (!confirmed) return;
-
-    try {
-      const response = await fetch(`/admin/exam/${examId}/status`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ status: nextStatus })
-      });
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        throw new Error(data.message || "Could not update exam status");
-      }
-      await loadExams();
-      setExamScheduleStatus(`Exam #${examId} is now ${nextStatus}.`);
-    } catch (error) {
-      setExamScheduleStatus(error.message || "Could not update exam status.");
-    }
   };
 
   const handleCancelExamEdit = () => {
     setEditingExamId(null);
-    setCourseSelect("");
-    setCustomCourse("");
     setScheduleStartDate("");
     setScheduleStartTime("");
-    setCutoff("");
+    setScheduleCollegeId("");
     setExamScheduleStatus("");
   };
-
 
   const logoutAdmin = () => {
     fetch("/admin/logout", { method: "POST" })
@@ -1563,21 +1607,17 @@ function AdminDashboard() {
     }
   }, []);
 
-  const fetchRegularQuestionSheet = useCallback(async (courseOverride = "") => {
-    const courseValue = String(courseOverride || regularQuestionCourse || "").trim();
-    if (!courseValue) {
-      setRegularQuestionSheetData(null);
-      setRegularQuestionSheetError("Select a course to load regular question sheet.");
-      return;
-    }
-
+  const fetchRegularQuestionSheet = useCallback(async () => {
     setRegularQuestionSheetLoading(true);
     setRegularQuestionSheetError("");
     try {
-      const response = await fetch(`/admin/regular/questions?course=${encodeURIComponent(courseValue)}`, {
+      const response = await fetch(
+        `/admin/regular/questions?collegeId=${encodeURIComponent(String(collegeId || ""))}`,
+        {
         credentials: "include",
         cache: "no-store"
-      });
+        }
+      );
       const data = await response.json();
       if (!response.ok || !data.success) {
         throw new Error(data.message || "Could not load regular question sheet");
@@ -1590,7 +1630,7 @@ function AdminDashboard() {
     } finally {
       setRegularQuestionSheetLoading(false);
     }
-  }, [regularQuestionCourse]);
+  }, [collegeId]);
 
   const openWalkinQuestionEditor = (category, row, stream = "") => {
     const questionTypeRaw =
@@ -1623,6 +1663,36 @@ function AdminDashboard() {
     if (walkinQuestionEditSaving) return;
     setWalkinQuestionEditor((prev) => ({ ...prev, open: false }));
     setWalkinQuestionEditStatus("");
+  };
+
+  const openRegularQuestionEditor = (category, row) => {
+    setRegularQuestionEditStatus("");
+    setRegularQuestionEditor({
+      open: true,
+      category: String(category || "").toLowerCase(),
+      questionId: Number(row?.question_id || 0),
+      questionType: String(row?.question_type || "MCQ"),
+      sectionName: String(row?.section_name || ""),
+      backgroundType: String(row?.background_type || ""),
+      questionText: String(row?.question_text || ""),
+      optionA: String(row?.option_a || ""),
+      optionB: String(row?.option_b || ""),
+      optionC: String(row?.option_c || ""),
+      optionD: String(row?.option_d || ""),
+      correctOption: ["A", "B", "C", "D"].includes(String(row?.correct_answer || "").toUpperCase())
+        ? String(row.correct_answer).toUpperCase()
+        : "A"
+    });
+  };
+
+  const closeRegularQuestionEditor = () => {
+    if (regularQuestionEditSaving) return;
+    setRegularQuestionEditor((prev) => ({ ...prev, open: false }));
+    setRegularQuestionEditStatus("");
+  };
+
+  const handleRegularQuestionEditorChange = (field, value) => {
+    setRegularQuestionEditor((prev) => ({ ...prev, [field]: value }));
   };
 
   const handleWalkinQuestionEditorChange = (field, value) => {
@@ -1706,6 +1776,63 @@ function AdminDashboard() {
       setWalkinQuestionEditStatus(error.message || "Could not update question.");
     } finally {
       setWalkinQuestionEditSaving(false);
+    }
+  };
+
+  const saveRegularQuestionEdit = async () => {
+    const category = String(regularQuestionEditor.category || "").trim().toLowerCase();
+    const questionId = Number(regularQuestionEditor.questionId || 0);
+    const questionText = String(regularQuestionEditor.questionText || "").trim();
+    const optionA = String(regularQuestionEditor.optionA || "").trim();
+    const optionB = String(regularQuestionEditor.optionB || "").trim();
+    const optionC = String(regularQuestionEditor.optionC || "").trim();
+    const optionD = String(regularQuestionEditor.optionD || "").trim();
+    const correctAnswer = String(regularQuestionEditor.correctOption || "").trim().toUpperCase();
+
+    if (!category || !questionId) {
+      setRegularQuestionEditStatus("Invalid regular question context.");
+      return;
+    }
+    if (!questionText) {
+      setRegularQuestionEditStatus("Question text cannot be empty.");
+      return;
+    }
+    if (!optionA || !optionB || !optionC || !optionD) {
+      setRegularQuestionEditStatus("All options are required.");
+      return;
+    }
+    if (!["A", "B", "C", "D"].includes(correctAnswer)) {
+      setRegularQuestionEditStatus("Select a valid correct answer.");
+      return;
+    }
+
+    setRegularQuestionEditSaving(true);
+    setRegularQuestionEditStatus("");
+    try {
+      const response = await fetch(`/admin/regular/questions/${category}/${questionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question_text: questionText,
+          option_a: optionA,
+          option_b: optionB,
+          option_c: optionC,
+          option_d: optionD,
+          correct_answer: correctAnswer
+        })
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) {
+        throw new Error(data.message || "Could not update regular question");
+      }
+      await fetchRegularQuestionSheet();
+      setRegularQuestionEditor((prev) => ({ ...prev, open: false }));
+      setRegularQuestionEditStatus("Question updated successfully.");
+    } catch (error) {
+      console.error("Regular question update error:", error);
+      setRegularQuestionEditStatus(error.message || "Could not update regular question.");
+    } finally {
+      setRegularQuestionEditSaving(false);
     }
   };
 
@@ -1900,10 +2027,10 @@ function AdminDashboard() {
   }, [activeSection, fetchWalkinSheet, walkinSheetData, walkinSheetLoading]);
 
   useEffect(() => {
-    if (activeSection === "regular-questions" && regularQuestionCourse) {
-      fetchRegularQuestionSheet(regularQuestionCourse);
+    if (activeSection === "regular-questions") {
+      fetchRegularQuestionSheet();
     }
-  }, [activeSection, regularQuestionCourse, fetchRegularQuestionSheet]);
+  }, [activeSection, fetchRegularQuestionSheet]);
 
   useEffect(() => {
     if (activeSection === "walkin-results" && !walkinResultsLoading && walkinResults === null) {
@@ -2116,7 +2243,8 @@ function AdminDashboard() {
         const matchQuery =
           !query ||
           String(exam.exam_id || "").toLowerCase().includes(query) ||
-          String(exam.course || "").toLowerCase().includes(query);
+          String(exam.course || "").toLowerCase().includes(query) ||
+          String(exam.college_name || exam.college_id || "").toLowerCase().includes(query);
         const matchStatus =
           examListStatusFilter === "ALL" ||
           normalizeExamStatus(exam.exam_status) === examListStatusFilter;
@@ -2124,11 +2252,6 @@ function AdminDashboard() {
       })
       .sort((a, b) => Number(b.exam_id || 0) - Number(a.exam_id || 0));
   }, [exams, examListSearch, examListStatusFilter]);
-  const regularQuestionCourseOptions = useMemo(() => {
-    const fromExams = (exams || []).map((exam) => String(exam.course || "").trim()).filter(Boolean);
-    const fromStudents = (regularStudents || []).map((student) => String(student.course || "").trim()).filter(Boolean);
-    return [...new Set([...fromExams, ...fromStudents])].sort((left, right) => left.localeCompare(right));
-  }, [exams, regularStudents]);
   const regularQuestionSections = useMemo(() => {
     const rows = Array.isArray(regularQuestionSheetData?.questions) ? regularQuestionSheetData.questions : [];
     const grouped = new Map();
@@ -2139,6 +2262,24 @@ function AdminDashboard() {
     });
     return Array.from(grouped.entries()).map(([sectionName, questions]) => ({ sectionName, questions }));
   }, [regularQuestionSheetData]);
+  const regularAptitudeQuestions = useMemo(
+    () => regularQuestionSections.find((section) => String(section.sectionName || "").toUpperCase() === "APTITUDE")?.questions || [],
+    [regularQuestionSections]
+  );
+  const regularTechnicalQuestions = useMemo(
+    () => regularQuestionSections
+      .filter((section) => String(section.sectionName || "").toUpperCase() !== "APTITUDE")
+      .flatMap((section) => section.questions || []),
+    [regularQuestionSections]
+  );
+  const regularTechBackgroundQuestions = useMemo(
+    () => regularTechnicalQuestions.filter((question) => String(question.background_type || "").trim().toUpperCase() === "TECH"),
+    [regularTechnicalQuestions]
+  );
+  const regularNonTechBackgroundQuestions = useMemo(
+    () => regularTechnicalQuestions.filter((question) => String(question.background_type || "").trim().toUpperCase() === "NON_TECH"),
+    [regularTechnicalQuestions]
+  );
   const studentProfileCourseOptions = useMemo(() => {
     return [...new Set((students || []).map((student) => String(student.course || "")).filter(Boolean))];
   }, [students]);
@@ -2926,7 +3067,6 @@ function AdminDashboard() {
                                 </div>
                                 <p className="item-text">{q.question_text}</p>
                                 {renderWalkinOptions(q)}
-                                <p className="item-answer">Answer: {q.correct_option || "-"}</p>
                               </div>
                             ))}
                           </div>
@@ -2966,9 +3106,6 @@ function AdminDashboard() {
                                   </div>
                                   <p className="item-text">{row.question_text}</p>
                                   {row.question_type?.toLowerCase() === "mcq" && renderWalkinOptions(row)}
-                                  {row.question_type?.toLowerCase() === "mcq" && (
-                                    <p className="item-answer">Answer: {row.correct_option || "-"}</p>
-                                  )}
                                   {row.descriptive_answer && (
                                     <p className="item-answer">Sample solution: {row.descriptive_answer}</p>
                                   )}
@@ -3008,60 +3145,106 @@ function AdminDashboard() {
               {activeSection === "regular-questions" && (
                 <div className="dashboard-section admin-section" id="regular-questions">
                   <h2>Regular Exam Questions Sheet</h2>
-                  <div className="table-toolbar">
-                    <select
-                      value={regularQuestionCourse}
-                      onChange={(event) => setRegularQuestionCourse(event.target.value)}
-                    >
-                      <option value="">Select Course</option>
-                      {regularQuestionCourseOptions.map((course) => (
-                        <option key={`rq-course-${course}`} value={course}>
-                          {course}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="secondary-btn"
-                      onClick={() => fetchRegularQuestionSheet(regularQuestionCourse)}
-                      disabled={regularQuestionSheetLoading || !regularQuestionCourse}
-                    >
-                      {regularQuestionSheetLoading ? "Loading..." : "Load Questions"}
-                    </button>
-                  </div>
+                  {regularQuestionEditStatus && <p className="section-placeholder">{regularQuestionEditStatus}</p>}
                   {regularQuestionSheetError && <p className="auth-help">{regularQuestionSheetError}</p>}
                   {regularQuestionSheetData?.exam && (
-                    <p className="item-meta" style={{ marginTop: 8 }}>
+                    <p className="section-placeholder" style={{ marginTop: 8 }}>
                       Exam ID: {regularQuestionSheetData.exam.exam_id} | Status: {normalizeExamStatus(regularQuestionSheetData.exam.exam_status)} | Schedule: {formatIST24(regularQuestionSheetData.exam.start_at)} to {formatIST24(regularQuestionSheetData.exam.end_at)}
                     </p>
                   )}
                   {regularQuestionSheetLoading && renderTableSkeleton(8)}
-                  {!regularQuestionSheetLoading && regularQuestionSections.length === 0 && regularQuestionCourse && !regularQuestionSheetError && (
-                    <p className="section-placeholder">No regular exam questions found for this course.</p>
+                  {!regularQuestionSheetLoading && regularQuestionSections.length === 0 && !regularQuestionSheetError && (
+                    <p className="section-placeholder">No regular exam questions found.</p>
                   )}
                   {!regularQuestionSheetLoading && regularQuestionSections.length > 0 && (
-                    <div className="walkin-sheet-grid walkin-sheet-grid-single">
-                      {regularQuestionSections.map((sectionBlock) => (
-                        <div className="walkin-sheet-block" key={`regular-section-${sectionBlock.sectionName}`}>
-                          <h3>{sectionBlock.sectionName}</h3>
-                          {sectionBlock.questions.map((question) => (
-                            <div className="walkin-sheet-item" key={`regular-question-${question.question_id}`}>
-                              <p className="item-meta">QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
-                              <p className="item-text">{question.question_text}</p>
-                              {String(question.question_type || "").toLowerCase().includes("mcq") && (
-                                <>
-                                  {question.option_a && <p className="item-option"><span className="option-label">A.</span> {question.option_a}</p>}
-                                  {question.option_b && <p className="item-option"><span className="option-label">B.</span> {question.option_b}</p>}
-                                  {question.option_c && <p className="item-option"><span className="option-label">C.</span> {question.option_c}</p>}
-                                  {question.option_d && <p className="item-option"><span className="option-label">D.</span> {question.option_d}</p>}
-                                  <p className="item-answer">Answer: {question.correct_answer || "--"}</p>
-                                </>
-                              )}
+                    <>
+                      <div className="walkin-sheet-section-tabs">
+                        <button
+                          type="button"
+                          className={`walkin-tab ${regularQuestionSectionTab === "aptitude" ? "active" : ""}`}
+                          onClick={() => setRegularQuestionSectionTab("aptitude")}
+                        >
+                          Aptitude Questions
+                        </button>
+                        <button
+                          type="button"
+                          className={`walkin-tab ${regularQuestionSectionTab === "technical" ? "active" : ""}`}
+                          onClick={() => setRegularQuestionSectionTab("technical")}
+                        >
+                          Technical Questions
+                        </button>
+                      </div>
+
+                      <div className="walkin-sheet-grid walkin-sheet-grid-single">
+                        {regularQuestionSectionTab === "aptitude" && (
+                          <div className="walkin-sheet-block">
+                            <h3>Aptitude Questions</h3>
+                            {regularAptitudeQuestions.length === 0 && <p>No aptitude questions defined.</p>}
+                            {regularAptitudeQuestions.map((question) => (
+                              <div className="walkin-sheet-item" key={`regular-aptitude-${question.question_id}`}>
+                                <div className="walkin-sheet-item-head">
+                                  <p className="item-meta">QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
+                                  <button
+                                    type="button"
+                                    className="walkin-question-edit-btn"
+                                    onClick={() => openRegularQuestionEditor("aptitude", question)}
+                                  >
+                                    Edit
+                                  </button>
+                                </div>
+                                <p className="item-text">{question.question_text}</p>
+                                {renderRegularQuestionSheetOptions(question)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {regularQuestionSectionTab === "technical" && (
+                          <>
+                            <div className="walkin-sheet-block">
+                              <h3>TECH Background</h3>
+                              {regularTechBackgroundQuestions.length === 0 && <p>No TECH background questions defined.</p>}
+                              {regularTechBackgroundQuestions.map((question) => (
+                                <div className="walkin-sheet-item" key={`regular-technical-tech-${question.question_id}`}>
+                                  <div className="walkin-sheet-item-head">
+                                    <p className="item-meta">{question.section_name} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
+                                    <button
+                                      type="button"
+                                      className="walkin-question-edit-btn"
+                                      onClick={() => openRegularQuestionEditor("technical", question)}
+                                    >
+                                      Edit
+                                    </button>
+                                  </div>
+                                  <p className="item-text">{question.question_text}</p>
+                                  {renderRegularQuestionSheetOptions(question)}
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
+                            <div className="walkin-sheet-block">
+                              <h3>NON_TECH Background</h3>
+                              {regularNonTechBackgroundQuestions.length === 0 && <p>No NON_TECH background questions defined.</p>}
+                              {regularNonTechBackgroundQuestions.map((question) => (
+                                <div className="walkin-sheet-item" key={`regular-technical-non-tech-${question.question_id}`}>
+                                  <div className="walkin-sheet-item-head">
+                                    <p className="item-meta">{question.section_name} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
+                                    <button
+                                      type="button"
+                                      className="walkin-question-edit-btn"
+                                      onClick={() => openRegularQuestionEditor("technical", question)}
+                                    >
+                                      Edit
+                                    </button>
+                                  </div>
+                                  <p className="item-text">{question.question_text}</p>
+                                  {renderRegularQuestionSheetOptions(question)}
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </>
                   )}
                 </div>
               )}
@@ -3098,8 +3281,6 @@ function AdminDashboard() {
                         <th>Course</th>
                         <th>Marks</th>
                         <th>Percentage</th>
-                        <th>Submission Time</th>
-                        <th>Feedback Snippet</th>
                         <th>Status</th>
                         <th>Actions</th>
                       </tr>
@@ -3107,7 +3288,7 @@ function AdminDashboard() {
                     <tbody>
                       {filteredRegularResults.length === 0 && (
                         <tr>
-                          <td colSpan="10" style={{ textAlign: "center" }}>No results found</td>
+                          <td colSpan="8" style={{ textAlign: "center" }}>No results found</td>
                         </tr>
                       )}
                       {filteredRegularResults.map((result) => {
@@ -3124,10 +3305,6 @@ function AdminDashboard() {
                         const percentageText = Number.isFinite(percentageValue)
                           ? `${percentageValue.toFixed(2)}%`
                           : "--";
-                        const submissionTimeText = result.submission_time
-                          ? formatIST24(result.submission_time)
-                          : "--";
-                        const feedbackSnippet = String(result.feedback_snippet || "").trim() || "--";
                         return (
                           <tr key={result.result_id}>
                             <td>{result.result_id}</td>
@@ -3136,8 +3313,6 @@ function AdminDashboard() {
                             <td>{result.course}</td>
                             <td>{marksText}</td>
                             <td>{percentageText}</td>
-                            <td>{submissionTimeText}</td>
-                            <td title={feedbackSnippet}>{feedbackSnippet}</td>
                             <td>{result.result_status || result.pass_fail || result.attempt_status || "--"}</td>
                             <td>
                               <button
@@ -3159,6 +3334,7 @@ function AdminDashboard() {
 
               {activeSection === "walkin" && (
               <>
+                {(walkinTempLoading || walkinTempRequests.length > 0) && (
                 <div className="dashboard-section admin-section" id="walkin-approval">
                   <h2>Pending Walk-In Approval Requests ({walkinTempRequests.length})</h2>
                   {walkinTempStatus && (
@@ -3177,9 +3353,6 @@ function AdminDashboard() {
                     </p>
                   )}
                   {walkinTempLoading && renderTableSkeleton(4)}
-                  {!walkinTempLoading && walkinTempRequests.length === 0 && (
-                    <p className="section-placeholder">No pending walk-in requests.</p>
-                  )}
                   {!walkinTempLoading && walkinTempRequests.length > 0 && (
                     <div className="table-shell">
                       <table className="sticky-table pending-approval-table">
@@ -3239,6 +3412,7 @@ function AdminDashboard() {
                     </div>
                   )}
                 </div>
+                )}
 
                 <div className="dashboard-section admin-section" id="walkin-create">
                   <h2>Create Walk-In Student Account</h2>
@@ -3703,24 +3877,13 @@ function AdminDashboard() {
                     </div>
                     <div className="form-field">
                       <label>College</label>
-                      <input
-                        type="text"
-                        placeholder="Search college"
-                        value={regularCollegeSearch}
-                        onChange={(event) => setRegularCollegeSearch(event.target.value)}
-                      />
                       <select
                         value={regularForm.collegeId}
                         onChange={(event) => setRegularForm({ ...regularForm, collegeId: event.target.value })}
                         required
                       >
                         <option value="">Select college</option>
-                        {collegeOptionsSortedByName
-                          .filter((college) => {
-                            const q = String(regularCollegeSearch || "").trim().toLowerCase();
-                            return !q || String(college.college_name || "").toLowerCase().includes(q);
-                          })
-                          .map((college) => (
+                        {collegeOptionsSortedByName.map((college) => (
                           <option key={college.college_id} value={college.college_id}>
                             {college.college_name}
                           </option>
@@ -3765,26 +3928,36 @@ function AdminDashboard() {
                       />
                     </div>
                     <div className="form-field">
+                      <label>Background</label>
+                      <select
+                        value={regularForm.background}
+                        onChange={(event) =>
+                          setRegularForm({
+                            ...regularForm,
+                            background: event.target.value,
+                            course: ""
+                          })
+                        }
+                      >
+                        <option value="">Select Background</option>
+                        <option value="TECH">TECH</option>
+                        <option value="NON_TECH">NON_TECH</option>
+                      </select>
+                    </div>
+                    <div className="form-field">
                       <label>Course</label>
                       <select
                         value={regularForm.course}
                         onChange={(event) => setRegularForm({ ...regularForm, course: event.target.value })}
+                        disabled={!regularForm.background}
                       >
-                        <option value="">Select Course</option>
-                        {REGULAR_COURSES.map((course) => (
+                        <option value="">{regularForm.background ? "Select Course" : "Select Background First"}</option>
+                        {getRegularCoursesByBackground(regularForm.background).map((course) => (
                           <option key={course} value={course}>
                             {course}
                           </option>
                         ))}
                       </select>
-                    </div>
-                    <div className="form-field">
-                      <label>Background</label>
-                      <input
-                        type="text"
-                        value={getRegularBackgroundType(regularForm.course) || "--"}
-                        readOnly
-                      />
                     </div>
                     <div className="form-field">
                       <label>Password</label>
@@ -4579,50 +4752,45 @@ function AdminDashboard() {
 
               {activeSection === "create-exam" && (
               <div className="dashboard-section admin-section" id="admin-exams">
-                <h2>Course Exam Schedule</h2>
+                <h2>Regular Exam Schedule</h2>
                 <div>
                   <h3>Update Schedule</h3>
+                  <p className="section-placeholder">
+                    Schedule one regular exam for all regular-course students in the selected college. Course selection is not required here.
+                  </p>
                   <form className="form-row schedule-form" onSubmit={handleCreateExam}>
-                    <select
-                      value={courseSelect}
-                      onChange={(event) => setCourseSelect(event.target.value)}
-                    >
-                      <option value="">Select Course</option>
-                      {REGULAR_COURSES.map((course) => (
-                        <option key={course} value={course}>
-                          {course}
-                        </option>
-                      ))}
-                      <option value="OTHER">Other</option>
-                    </select>
-
-                    {courseSelect === "OTHER" && (
+                    <div className="form-field">
+                      <label htmlFor="regular-exam-college">College</label>
+                      <select
+                        id="regular-exam-college"
+                        value={scheduleCollegeId}
+                        onChange={(event) => setScheduleCollegeId(event.target.value)}
+                      >
+                        <option value="">Select college</option>
+                        {collegeOptionsSortedByName.map((college) => (
+                          <option key={`regular-exam-college-${college.college_id}`} value={college.college_id}>
+                            {college.college_name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="form-field">
+                      <label htmlFor="regular-exam-start-date">Start Date</label>
                       <input
-                        type="text"
-                        placeholder="Enter custom course"
-                        value={customCourse}
-                        onChange={(event) => setCustomCourse(event.target.value)}
+                        id="regular-exam-start-date"
+                        type="date"
+                        value={scheduleStartDate}
+                        onChange={(event) => setScheduleStartDate(event.target.value)}
                       />
-                    )}
-
-                    <input
-                      type="date"
-                      value={scheduleStartDate}
-                      onChange={(event) => setScheduleStartDate(event.target.value)}
-                    />
-                    <input
-                      type="time"
-                      value={scheduleStartTime}
-                      onChange={(event) => setScheduleStartTime(event.target.value)}
-                    />
-                    <input
-                      type="number"
-                      placeholder="Cutoff % (optional)"
-                      value={cutoff}
-                      onChange={(event) => setCutoff(event.target.value)}
-                    />
-                    <div className="schedule-fixed-meta" aria-label="Fixed exam config">
-                      Fixed: Duration 15 minutes | Questions 15
+                    </div>
+                    <div className="form-field">
+                      <label htmlFor="regular-exam-start-time">Start Time</label>
+                      <input
+                        id="regular-exam-start-time"
+                        type="time"
+                        value={scheduleStartTime}
+                        onChange={(event) => setScheduleStartTime(event.target.value)}
+                      />
                     </div>
 
                     <button type="submit" className="schedule-generate-btn" disabled={examCreateSubmitting}>
@@ -4640,48 +4808,36 @@ function AdminDashboard() {
                 </div>
                 <div className="form-table-divider" aria-hidden="true" />
                 <div style={{ marginTop: 24 }}>
-                  <h3>Scheduled Course Exams</h3>
+                  <h3>Scheduled Regular Exams</h3>
                   <div className="table-toolbar">
                     <input
                       type="text"
-                      placeholder="Search by exam id or course"
+                      placeholder="Search by exam id"
                       value={examListSearch}
                       onChange={(event) => setExamListSearch(event.target.value)}
                     />
-                    <select
-                      value={examListStatusFilter}
-                      onChange={(event) => setExamListStatusFilter(event.target.value)}
-                    >
-                      <option value="ALL">All Status</option>
-                      {examStatusOptions.map((status) => (
-                        <option key={`ex-status-${status}`} value={status}>
-                          {status}
-                        </option>
-                      ))}
-                    </select>
                   </div>
                   <div className="table-shell" aria-label="Exams table container">
                   <table className="sticky-table" aria-label="Exams table">
                     <thead>
                       <tr>
                         <th>ID</th>
-                        <th>Course</th>
+                        <th>College</th>
                         <th>Status</th>
                         <th>Schedule</th>
-                        <th>Cutoff</th>
                         <th>Action</th>
                       </tr>
                     </thead>
                     <tbody>
                       {filteredExams.length === 0 && (
                         <tr>
-                          <td colSpan="6" style={{ textAlign: "center" }}>No exams found</td>
+                          <td colSpan="5" style={{ textAlign: "center" }}>No exams found</td>
                         </tr>
                       )}
                       {filteredExams.map((exam) => (
                         <tr key={exam.exam_id}>
                           <td>{exam.exam_id}</td>
-                          <td>{exam.course}</td>
+                          <td>{exam.college_name || exam.college_id || "--"}</td>
                           <td>
                             <span className={`status-badge ${normalizeExamStatus(exam.exam_status) === "READY" ? "active" : "inactive"}`}>
                               {normalizeExamStatus(exam.exam_status)}
@@ -4692,17 +4848,9 @@ function AdminDashboard() {
                             to{" "}
                             {formatIST24(exam.end_at)}
                           </td>
-                          <td>{exam.cutoff ?? "--"}</td>
                           <td>
                             <button className="secondary-btn" onClick={() => handleEditExam(exam)}>
                               Edit
-                            </button>
-                            <button
-                              className="secondary-btn"
-                              style={{ marginLeft: 8 }}
-                              onClick={() => handleToggleExamStatus(exam)}
-                            >
-                              {normalizeExamStatus(exam.exam_status) === "READY" ? "Deactivate" : "Activate"}
                             </button>
                           </td>
                         </tr>
@@ -4927,6 +5075,102 @@ function AdminDashboard() {
                     disabled={walkinQuestionEditSaving}
                   >
                     {walkinQuestionEditSaving ? "Saving..." : "Save Changes"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {regularQuestionEditor.open && (
+            <div
+              className="admin-confirm-overlay"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="regular-edit-title"
+              onClick={closeRegularQuestionEditor}
+            >
+              <div className="admin-confirm-card walkin-question-editor-card" onClick={(event) => event.stopPropagation()}>
+                <h3 id="regular-edit-title">Edit Regular Question</h3>
+                <p className="item-meta">
+                  {regularQuestionEditor.category.toUpperCase()} | QID: {regularQuestionEditor.questionId}
+                  {regularQuestionEditor.backgroundType ? ` | ${regularQuestionEditor.backgroundType}` : ""}
+                  {regularQuestionEditor.sectionName ? ` | ${regularQuestionEditor.sectionName}` : ""}
+                </p>
+                <div className="walkin-question-editor-grid">
+                  <label className="walkin-question-editor-field">
+                    <span>Question Text</span>
+                    <textarea
+                      value={regularQuestionEditor.questionText}
+                      onChange={(event) => handleRegularQuestionEditorChange("questionText", event.target.value)}
+                      rows={4}
+                      disabled={regularQuestionEditSaving}
+                    />
+                  </label>
+                  <label className="walkin-question-editor-field">
+                    <span>Option A</span>
+                    <input
+                      type="text"
+                      value={regularQuestionEditor.optionA}
+                      onChange={(event) => handleRegularQuestionEditorChange("optionA", event.target.value)}
+                      disabled={regularQuestionEditSaving}
+                    />
+                  </label>
+                  <label className="walkin-question-editor-field">
+                    <span>Option B</span>
+                    <input
+                      type="text"
+                      value={regularQuestionEditor.optionB}
+                      onChange={(event) => handleRegularQuestionEditorChange("optionB", event.target.value)}
+                      disabled={regularQuestionEditSaving}
+                    />
+                  </label>
+                  <label className="walkin-question-editor-field">
+                    <span>Option C</span>
+                    <input
+                      type="text"
+                      value={regularQuestionEditor.optionC}
+                      onChange={(event) => handleRegularQuestionEditorChange("optionC", event.target.value)}
+                      disabled={regularQuestionEditSaving}
+                    />
+                  </label>
+                  <label className="walkin-question-editor-field">
+                    <span>Option D</span>
+                    <input
+                      type="text"
+                      value={regularQuestionEditor.optionD}
+                      onChange={(event) => handleRegularQuestionEditorChange("optionD", event.target.value)}
+                      disabled={regularQuestionEditSaving}
+                    />
+                  </label>
+                  <label className="walkin-question-editor-field">
+                    <span>Correct Option</span>
+                    <select
+                      value={regularQuestionEditor.correctOption}
+                      onChange={(event) => handleRegularQuestionEditorChange("correctOption", event.target.value)}
+                      disabled={regularQuestionEditSaving}
+                    >
+                      <option value="A">A</option>
+                      <option value="B">B</option>
+                      <option value="C">C</option>
+                      <option value="D">D</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="admin-confirm-actions">
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={closeRegularQuestionEditor}
+                    disabled={regularQuestionEditSaving}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="admin-confirm-btn"
+                    onClick={saveRegularQuestionEdit}
+                    disabled={regularQuestionEditSaving}
+                  >
+                    {regularQuestionEditSaving ? "Saving..." : "Save Changes"}
                   </button>
                 </div>
               </div>

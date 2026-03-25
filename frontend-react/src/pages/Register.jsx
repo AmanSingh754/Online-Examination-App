@@ -1,93 +1,7 @@
-import { useEffect, useState } from "react";
 import useBodyClass from "../hooks/useBodyClass.js";
 
 function Register() {
   useBodyClass("landing-page student-landing auth-page");
-  const [notice, setNotice] = useState("");
-  const [isRegistering, setIsRegistering] = useState(false);
-  const [colleges, setColleges] = useState([]);
-  const [collegeError, setCollegeError] = useState("");
-  const [formState, setFormState] = useState({
-    name: "",
-    email: "",
-    phone: "",
-    dob: "",
-    course: "",
-    collegeId: "",
-    password: "",
-  });
-
-  useEffect(() => {
-    async function loadColleges() {
-      try {
-        const response = await fetch("/student/colleges");
-        const data = await response.json();
-        if (Array.isArray(data) && data.length > 0) {
-          setColleges(data);
-          setFormState((prev) => ({
-            ...prev,
-            collegeId: String(data[0].college_id)
-          }));
-          setCollegeError("");
-        } else {
-          setCollegeError("No colleges available yet.");
-        }
-      } catch (err) {
-        console.error("College load error:", err);
-        setCollegeError("Could not load colleges.");
-      }
-    }
-    loadColleges();
-  }, []);
-
-  const handleSubmit = async (event) => {
-    event.preventDefault();
-    if (isRegistering) return;
-    setNotice("");
-
-    if (!formState.name || !formState.email || !formState.phone || !formState.dob || !formState.course || !formState.collegeId || !formState.password) {
-      setNotice("Please fill in all fields.");
-      return;
-    }
-
-    try {
-      setIsRegistering(true);
-      const response = await fetch("/student/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: formState.name,
-          email: formState.email,
-          phone: formState.phone,
-          dob: formState.dob,
-          course: formState.course,
-          collegeId: formState.collegeId,
-          password: formState.password,
-        }),
-      });
-      const data = await response.json();
-      if (!data.success) {
-        setNotice(data.message || "Registration failed.");
-        return;
-      }
-      const successMessage = `Registration successful${data.studentId ? ` (Student ID: ${data.studentId})` : ""}. Please log in.`;
-      setNotice(successMessage);
-      setFormState({
-        name: "",
-        email: "",
-        phone: "",
-        dob: "",
-        course: "",
-        collegeId: "",
-        password: "",
-      });
-    } catch (err) {
-      console.error("Registration error:", err);
-      setNotice("Server error during registration.");
-    } finally {
-      setIsRegistering(false);
-    }
-  };
 
   return (
     <div className="landing-shell">
@@ -98,103 +12,32 @@ function Register() {
         </div>
         <nav className="landing-nav">
           <a href="/" className="nav-link">Student Home</a>
-          <a href="/register" className="nav-link">Register</a>
+          <a
+            href="#"
+            className="nav-link"
+            aria-disabled="true"
+            onClick={(event) => event.preventDefault()}
+          >
+            Register
+          </a>
           <a className="nav-cta" href="/student/login">Login</a>
         </nav>
       </header>
 
       <main className="auth-main">
         <section className="auth-copy">
-          <p className="hero-eyebrow">Student Registration</p>
-          <h1>Create your scholarship profile.</h1>
+          <p className="hero-eyebrow">Registration Closed</p>
+          <h1>Regular student accounts are created by admin only.</h1>
         </section>
 
         <section className="auth-card">
-          <h2>Create New Account</h2>
-          <p className="auth-meta">Fill in the form carefully to avoid mistakes.</p>
-          <form autoComplete="off" onSubmit={handleSubmit}>
-            <input
-              type="text"
-              name="student_register_name_input"
-              autoComplete="new-password"
-              placeholder="Full Name"
-              value={formState.name}
-              onChange={(event) => setFormState({ ...formState, name: event.target.value })}
-              required
-            />
-            <input
-              type="email"
-              name="student_register_email_input"
-              autoComplete="new-password"
-              placeholder="Email"
-              value={formState.email}
-              onChange={(event) => setFormState({ ...formState, email: event.target.value })}
-              required
-            />
-            <input
-              type="text"
-              name="student_register_phone_input"
-              autoComplete="new-password"
-              placeholder="Phone Number"
-              value={formState.phone}
-              onChange={(event) => setFormState({ ...formState, phone: event.target.value })}
-              required
-            />
-            <input
-              type="date"
-              name="student_register_dob_input"
-              autoComplete="off"
-              value={formState.dob}
-              onChange={(event) => setFormState({ ...formState, dob: event.target.value })}
-              required
-            />
-            <input
-              type="text"
-              name="student_register_course_input"
-              autoComplete="off"
-              placeholder="Course (max 15 chars)"
-              maxLength="15"
-              value={formState.course}
-              onChange={(event) => setFormState({ ...formState, course: event.target.value })}
-              required
-            />
-            {collegeError && (
-              <p className="auth-help" style={{ color: "#f8c7c7" }}>
-                {collegeError}
-              </p>
-            )}
-            <label className="auth-label">College</label>
-            <select
-              value={formState.collegeId}
-              onChange={(event) => setFormState({ ...formState, collegeId: event.target.value })}
-              required
-            >
-              <option value="">Select college</option>
-              {colleges.map((college) => (
-                <option key={college.college_id} value={college.college_id}>
-                  {college.college_name}
-                </option>
-              ))}
-            </select>
-            <input
-              type="password"
-              name="student_register_password_input"
-              autoComplete="new-password"
-              placeholder="Create Password"
-              value={formState.password}
-              onChange={(event) => setFormState({ ...formState, password: event.target.value })}
-              required
-            />
-            <button type="submit" disabled={isRegistering}>
-              {isRegistering ? "Registering..." : "Register"}
-            </button>
-          </form>
-          {notice && <p className="auth-help">{notice}</p>}
-          {!notice && (
-            <p className="auth-help">
-              Already registered? <a href="/student/login">Login here</a>
-            </p>
-          )}
+          <h2>Account Creation Disabled</h2>
+          <p className="auth-meta">
+            For regular exams, student accounts are created from the admin dashboard. Contact your college admin to receive your login credentials.
+          </p>
+          <p className="auth-help">
+            Already have credentials? <a href="/student/login">Login here</a>
+          </p>
         </section>
       </main>
 

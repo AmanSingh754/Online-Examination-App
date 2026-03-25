@@ -14,6 +14,7 @@ const {
     getWalkinStreamQuestionKey,
     getWalkinStreamLabel
 } = require("../utils/walkinStream");
+const { getRegularTechnicalSection } = require("../utils/courseBackground");
 
 router.use((req, res, next) => {
     if (req.method === "OPTIONS") {
@@ -49,9 +50,11 @@ let walkinAttemptedAtColumnChecked = false;
 let regularStudentExamTableChecked = false;
 let regularExamFeedbackTableChecked = false;
 let resultsSubmittedAtColumnChecked = false;
+let resultsFeedbackColumnsChecked = false;
 let walkinStudentExamTableChecked = false;
 let walkinAnswerSectionColumnChecked = false;
 let walkinAnswerSubmittedColumnChecked = false;
+const REGULAR_START_GRACE_MINUTES = 10;
 const normalizeWalkinStream = (value) => getWalkinStreamCodeOrDefault(value);
 const normalizeWalkinStreamStrict = (value) => getCanonicalWalkinStreamCode(value);
 const getWalkinStreamDbLabel = (value) => getWalkinStreamLabel(value);
@@ -62,6 +65,7 @@ const isWalkinStudentType = (value) => {
         .replace(/[\s-]/g, "_");
     return normalized === "WALKIN" || normalized === "WALK_IN";
 };
+const isWalkinSessionStudent = (req) => isWalkinStudentType(req.session?.student?.studentType);
 const getWalkinDurationMinutes = (streamCode) => {
     if (streamCode === "DS") return 60;
     if (streamCode === "DA") return 50;
@@ -81,20 +85,220 @@ const countWords = (text) =>
         .split(/\s+/)
         .filter(Boolean).length;
 
-const fetchLatestReadyRegularExamForCourse = async (course) => {
-    const normalizedCourse = String(course || "").trim();
-    if (!normalizedCourse) return null;
+const addMinutes = (dateValue, minutes) => {
+    const date = new Date(dateValue);
+    if (Number.isNaN(date.getTime())) return null;
+    return new Date(date.getTime() + (Number(minutes || 0) * 60 * 1000));
+};
+
+const getRegularExamTiming = (regularExam, nowMs = Date.now()) => {
+    const startAt = new Date(regularExam?.start_at || "");
+    const durationMinutes = Math.max(1, Number(regularExam?.duration_minutes || 60) || 60);
+    if (Number.isNaN(startAt.getTime())) {
+        return null;
+    }
+
+    const questionUnlockAt = addMinutes(startAt, REGULAR_START_GRACE_MINUTES);
+    const submissionDeadlineAt = addMinutes(questionUnlockAt, durationMinutes);
+    if (!questionUnlockAt || !submissionDeadlineAt) {
+        return null;
+    }
+
+    const startAtMs = startAt.getTime();
+    const questionUnlockAtMs = questionUnlockAt.getTime();
+    const submissionDeadlineMs = submissionDeadlineAt.getTime();
+    const beforeStart = nowMs < startAtMs;
+    const withinInstructionWindow = nowMs >= startAtMs && nowMs < questionUnlockAtMs;
+    const withinQuestionWindow = nowMs >= questionUnlockAtMs && nowMs <= submissionDeadlineMs;
+
+    return {
+        startGraceMinutes: REGULAR_START_GRACE_MINUTES,
+        questionDurationMinutes: durationMinutes,
+        startAt: startAt.toISOString(),
+        lateStartDeadlineAt: questionUnlockAt.toISOString(),
+        questionUnlockAt: questionUnlockAt.toISOString(),
+        submissionDeadlineAt: submissionDeadlineAt.toISOString(),
+        startsInSeconds: beforeStart ? Math.max(0, Math.ceil((startAtMs - nowMs) / 1000)) : 0,
+        unlockInSeconds: withinInstructionWindow ? Math.max(0, Math.ceil((questionUnlockAtMs - nowMs) / 1000)) : 0,
+        remainingQuestionSeconds: withinQuestionWindow ? Math.max(0, Math.ceil((submissionDeadlineMs - nowMs) / 1000)) : 0,
+        canStart: nowMs >= startAtMs && nowMs <= questionUnlockAtMs,
+        instructionWindowActive: withinInstructionWindow,
+        questionsVisible: nowMs >= questionUnlockAtMs,
+        submissionClosed: nowMs > submissionDeadlineMs,
+        lateStartClosed: nowMs > questionUnlockAtMs
+    };
+};
+
+const fetchLatestReadyRegularExamForCollege = async (collegeId) => {
     const rows = await queryAsync(
-        `SELECT exam_id, course, exam_status, start_at, end_at
+        `SELECT exam_id, exam_status, start_at, end_at, duration_minutes, college_id
          FROM regular_exams
-         WHERE LOWER(TRIM(course)) = LOWER(TRIM(?))
-           AND COALESCE(is_deleted, FALSE) = FALSE
+         WHERE COALESCE(is_deleted, FALSE) = FALSE
            AND exam_status = 'READY'
-         ORDER BY start_at DESC NULLS LAST, exam_id DESC
-         LIMIT 1`,
-        [normalizedCourse]
+           AND (college_id = ? OR college_id IS NULL)
+         ORDER BY
+             CASE WHEN college_id = ? THEN 0 ELSE 1 END,
+             start_at DESC NULLS LAST,
+             exam_id DESC
+         LIMIT 1`
+        ,
+        [collegeId || null, collegeId || null]
     );
     return rows?.[0] || null;
+};
+
+const fetchActiveRegularQuestionSet = async (examId, txQuery = queryAsync) => {
+    const rows = await txQuery(
+        `SELECT question_set_id
+         FROM regular_question_sets
+         WHERE exam_id = ?
+           AND set_status = 'ACTIVE'
+         ORDER BY generated_at DESC, question_set_id DESC
+         LIMIT 1`,
+        [examId]
+    );
+    return Number(rows?.[0]?.question_set_id || 0) || null;
+};
+
+const ensureRegularStudentQuestionSet = async ({ studentId, examId, requestedStudentExamId = 0, txQuery = queryAsync }) => {
+    await ensureRegularStudentExamTable();
+
+    let rows = [];
+    if (Number(requestedStudentExamId || 0) > 0) {
+        rows = await txQuery(
+            `SELECT student_exam_id, question_set_id, started_at
+             FROM regular_student_exam
+             WHERE student_exam_id = ?
+               AND student_id = ?
+               AND exam_id = ?
+             LIMIT 1`,
+            [requestedStudentExamId, studentId, examId]
+        );
+    } else {
+        rows = await txQuery(
+            `SELECT student_exam_id, question_set_id, started_at
+             FROM regular_student_exam
+             WHERE student_id = ?
+               AND exam_id = ?
+             LIMIT 1`,
+            [studentId, examId]
+        );
+    }
+
+    if (!rows?.length) {
+        try {
+            await txQuery(
+                `INSERT INTO regular_student_exam (student_id, exam_id) VALUES (?, ?)`,
+                [studentId, examId]
+            );
+        } catch (insertError) {
+            const duplicate =
+                Number(insertError?.errno) === 1062 ||
+                String(insertError?.code || "").toUpperCase() === "23505" ||
+                /duplicate key/i.test(String(insertError?.message || ""));
+            if (!duplicate) throw insertError;
+        }
+        rows = await txQuery(
+            `SELECT student_exam_id, question_set_id, started_at
+             FROM regular_student_exam
+             WHERE student_id = ?
+               AND exam_id = ?
+             LIMIT 1`,
+            [studentId, examId]
+        );
+    }
+
+    const studentExamId = Number(rows?.[0]?.student_exam_id || 0) || null;
+    let questionSetId = Number(rows?.[0]?.question_set_id || 0) || null;
+    if (!questionSetId) {
+        questionSetId = await fetchActiveRegularQuestionSet(examId, txQuery);
+        if (!questionSetId) {
+            throw new Error("NO_ACTIVE_REGULAR_QUESTION_SET");
+        }
+    }
+
+    await txQuery(
+        `UPDATE regular_student_exam
+         SET started_at = COALESCE(started_at, NOW()),
+             question_set_id = COALESCE(question_set_id, ?)
+         WHERE student_id = ?
+           AND exam_id = ?`,
+        [questionSetId, studentId, examId]
+    );
+
+    return { studentExamId, questionSetId };
+};
+
+const fetchRegularStudentAttempt = async ({ studentId, examId, requestedStudentExamId = 0, txQuery = queryAsync }) => {
+    await ensureRegularStudentExamTable();
+    const params = [];
+    let sql =
+        `SELECT student_exam_id, question_set_id, started_at
+         FROM regular_student_exam
+         WHERE student_id = ?
+           AND exam_id = ?`;
+    params.push(studentId, examId);
+    if (Number(requestedStudentExamId || 0) > 0) {
+        sql += ` AND student_exam_id = ?`;
+        params.push(requestedStudentExamId);
+    }
+    sql += ` LIMIT 1`;
+    const rows = await txQuery(sql, params);
+    return rows?.[0] || null;
+};
+
+const loadRegularSavedAnswers = async ({ studentId, examId, questionSetId, txQuery = queryAsync }) => {
+    if (!studentId || !examId || !questionSetId) return [];
+    return await txQuery(
+        `SELECT sa.question_id,
+                sa.selected_option,
+                q.question_type,
+                q.section_name
+         FROM regular_student_answers sa
+         JOIN regular_exam_questions q
+           ON q.exam_id = sa.exam_id
+          AND q.question_set_id = sa.question_set_id
+          AND q.question_id = sa.question_id
+         WHERE sa.student_id = ?
+           AND sa.exam_id = ?
+           AND sa.question_set_id = ?`,
+        [studentId, examId, questionSetId]
+    );
+};
+
+const mergeRegularSubmittedAnswers = ({ payloadAnswers = [], savedRows = [] }) => {
+    const merged = new Map();
+
+    savedRows.forEach((row) => {
+        const questionId = Number(row?.question_id || 0);
+        if (!questionId) return;
+        const selectedOption = String(row?.selected_option || "").trim().toUpperCase();
+        if (!selectedOption) return;
+        merged.set(questionId, {
+            question_id: questionId,
+            question_type: String(row?.question_type || "MCQ").trim().toLowerCase(),
+            section_name: String(row?.section_name || "").trim(),
+            selected_option: selectedOption
+        });
+    });
+
+    payloadAnswers.forEach((answer) => {
+        const questionId = Number(answer?.question_id || 0);
+        if (!questionId) return;
+        const selectedOption = String(answer?.selected_option || "").trim().toUpperCase();
+        if (!selectedOption) {
+            merged.delete(questionId);
+            return;
+        }
+        merged.set(questionId, {
+            question_id: questionId,
+            question_type: String(answer?.question_type || "MCQ").trim().toLowerCase(),
+            section_name: String(answer?.section_name || "").trim(),
+            selected_option: selectedOption
+        });
+    });
+
+    return [...merged.values()];
 };
 
 const CODE_RUNNERS = {
@@ -502,6 +706,34 @@ const ensureResultsSubmittedAtColumn = async () => {
     }
 };
 
+const ensureResultsFeedbackColumns = async () => {
+    if (resultsFeedbackColumnsChecked) return;
+    const columns = [
+        { name: "feedback_text", definition: "TEXT NULL" },
+        { name: "feedback_question_text", definition: "TEXT NULL" },
+        { name: "feedback_submission_mode", definition: "VARCHAR(20) NULL" }
+    ];
+    for (const column of columns) {
+        try {
+            await queryAsync(
+                `ALTER TABLE regular_student_results
+                 ADD COLUMN ${column.name} ${column.definition}`
+            );
+        } catch (error) {
+            const msg = String(error?.message || "");
+            const duplicateColumn =
+                Number(error?.errno) === 1060 ||
+                String(error?.code || "").toUpperCase() === "42701" ||
+                /duplicate column/i.test(msg) ||
+                /already exists/i.test(msg);
+            if (!duplicateColumn) {
+                throw error;
+            }
+        }
+    }
+    resultsFeedbackColumnsChecked = true;
+};
+
 const ensureWalkinStudentExamTable = async () => {
     if (walkinStudentExamTableChecked) return;
     await queryAsync(
@@ -574,12 +806,8 @@ const ensureWalkinAnswerSubmittedColumn = async () => {
     }
 };
 
-const isExamSubmitted = async (studentId, examId) => {
-    const walkinRows = await queryAsync(
-        `SELECT walkin_exam_id FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
-        [examId]
-    );
-    if (walkinRows && walkinRows.length > 0) {
+const isExamSubmitted = async (studentId, examId, { walkin = false } = {}) => {
+    if (walkin) {
         const statusRows = await queryAsync(
             `SELECT status FROM students WHERE student_id = ? LIMIT 1`,
             [studentId]
@@ -991,11 +1219,14 @@ router.post("/start", async (req, res) => {
     }
 
     try {
-        const walkinRows = await queryAsync(
-            `SELECT walkin_exam_id FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
-            [examId]
-        );
-        if (walkinRows && walkinRows.length > 0) {
+        if (isWalkinSessionStudent(req)) {
+            const walkinRows = await queryAsync(
+                `SELECT walkin_exam_id FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
+                [examId]
+            );
+            if (!walkinRows?.length) {
+                return res.status(404).json({ success: false, message: "Walk-in exam not found." });
+            }
             const studentRows = await queryAsync(
                 `SELECT status, course, student_type FROM students WHERE student_id = ? LIMIT 1`,
                 [studentId]
@@ -1048,7 +1279,7 @@ router.post("/start", async (req, res) => {
         }
 
         const regularStudentRows = await queryAsync(
-            `SELECT status, course, student_type
+            `SELECT status, course, student_type, college_id
              FROM students
              WHERE student_id = ?
              LIMIT 1`,
@@ -1062,26 +1293,21 @@ router.post("/start", async (req, res) => {
         if (isWalkinStudentType(regularStudent.student_type)) {
             return res.status(403).json({ success: false, message: "Forbidden" });
         }
-        const studentCourseRaw = String(regularStudent.course || "").trim();
-        const studentCourse = studentCourseRaw.toLowerCase();
-        if (!studentCourse) {
-            return res.status(403).json({ success: false, message: "Forbidden" });
-        }
-
-        const latestRegularExam = await fetchLatestReadyRegularExamForCourse(studentCourseRaw);
+        const latestRegularExam = await fetchLatestReadyRegularExamForCollege(regularStudent.college_id);
         if (!latestRegularExam) {
-            return res.status(404).json({ success: false, message: "No READY exam found for this course." });
+            return res.status(404).json({ success: false, message: "No READY regular exam found." });
         }
         if (Number(latestRegularExam.exam_id || 0) !== Number(examId)) {
-            return res.status(403).json({ success: false, message: "Only latest course exam can be started." });
+            return res.status(403).json({ success: false, message: "Only the latest regular exam can be started." });
         }
         const regularExam = latestRegularExam;
-
-        const startAtMs = new Date(regularExam.start_at).getTime();
-        const endAtMs = new Date(regularExam.end_at).getTime();
         const nowMs = Date.now();
-        if (Number.isFinite(startAtMs) && nowMs < startAtMs) {
-            const startsInSeconds = Math.max(0, Math.ceil((startAtMs - nowMs) / 1000));
+        const timing = getRegularExamTiming(regularExam, nowMs);
+        if (!timing) {
+            return res.status(500).json({ success: false, message: "Invalid regular exam schedule." });
+        }
+        if (timing.startsInSeconds > 0) {
+            const startsInSeconds = timing.startsInSeconds;
             const hours = Math.floor(startsInSeconds / 3600);
             const minutes = Math.floor((startsInSeconds % 3600) / 60);
             const seconds = startsInSeconds % 60;
@@ -1095,55 +1321,36 @@ router.post("/start", async (req, res) => {
                 startsAt: regularExam.start_at,
                 now: new Date(nowMs).toISOString(),
                 startsInSeconds,
+                lateStartDeadlineAt: timing.lateStartDeadlineAt,
                 message: `Exam starts in ${parts.join(" ")}`
             });
         }
-        if (Number.isFinite(endAtMs) && nowMs > endAtMs) {
-            return res.status(410).json({ success: false, message: "Exam window is closed." });
+        if (timing.lateStartClosed) {
+            return res.status(410).json({
+                success: false,
+                code: "exam_start_window_closed",
+                lateStartDeadlineAt: timing.lateStartDeadlineAt,
+                message: "The 10-minute start window is closed. You can no longer attend this regular exam."
+            });
         }
 
-        await ensureRegularStudentExamTable();
-
-        let rows = await queryAsync(
-            `SELECT student_exam_id
-             FROM regular_student_exam
-             WHERE student_id = ? AND exam_id = ?
-             LIMIT 1`,
-            [studentId, examId]
-        );
-
-        if (!rows || rows.length === 0) {
-            try {
-                await queryAsync(
-                    `INSERT INTO regular_student_exam (student_id, exam_id) VALUES (?, ?)`,
-                    [studentId, examId]
-                );
-            } catch (insertError) {
-                const duplicate =
-                    Number(insertError?.errno) === 1062 ||
-                    String(insertError?.code || "").toUpperCase() === "23505" ||
-                    /duplicate key/i.test(String(insertError?.message || ""));
-                if (!duplicate) throw insertError;
+        let regularAttempt;
+        try {
+            regularAttempt = await ensureRegularStudentQuestionSet({
+                studentId,
+                examId
+            });
+        } catch (questionSetError) {
+            if (String(questionSetError?.message || "") === "NO_ACTIVE_REGULAR_QUESTION_SET") {
+                return res.status(404).json({ success: false, message: "No active regular question set found." });
             }
-            rows = await queryAsync(
-                `SELECT student_exam_id
-                 FROM regular_student_exam
-                 WHERE student_id = ? AND exam_id = ?
-                 LIMIT 1`,
-                [studentId, examId]
-            );
+            throw questionSetError;
         }
-        await queryAsync(
-            `UPDATE regular_student_exam
-             SET started_at = COALESCE(started_at, NOW())
-             WHERE student_id = ?
-               AND exam_id = ?`,
-            [studentId, examId]
-        );
 
         return res.json({
             success: true,
-            studentExamId: Number(rows?.[0]?.student_exam_id || 0) || null
+            studentExamId: regularAttempt.studentExamId,
+            timing
         });
     } catch (error) {
         console.error("Start exam error:", error);
@@ -1157,21 +1364,27 @@ router.get("/duration/:examId", async (req, res) => {
         return res.status(400).json({ success: false, message: "Invalid exam id" });
     }
     try {
-        const walkinRows = await queryAsync(
-            `SELECT walkin_exam_id, stream FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
-            [examId]
-        );
-        if (walkinRows && walkinRows.length > 0) {
+        if (isWalkinSessionStudent(req)) {
+            const walkinRows = await queryAsync(
+                `SELECT walkin_exam_id, stream FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
+                [examId]
+            );
+            if (!walkinRows?.length) {
+                return res.status(404).json({ success: false, message: "Walk-in exam not found." });
+            }
             const streamCode = normalizeWalkinStream(walkinRows?.[0]?.stream);
             return res.json({ success: true, durationMinutes: getWalkinDurationMinutes(streamCode) });
         }
         const rows = await queryAsync(
-            `SELECT duration_minutes FROM regular_exams WHERE exam_id = ? LIMIT 1`,
+            `SELECT duration_minutes, start_at FROM regular_exams WHERE exam_id = ? LIMIT 1`,
             [examId]
         );
+        const exam = rows?.[0] || null;
         return res.json({
             success: true,
-            durationMinutes: Number(rows?.[0]?.duration_minutes || 0) || null
+            durationMinutes: Number(exam?.duration_minutes || 0) || null,
+            startGraceMinutes: REGULAR_START_GRACE_MINUTES,
+            timing: getRegularExamTiming(exam)
         });
     } catch (error) {
         console.error("Exam duration lookup error:", error);
@@ -1185,67 +1398,71 @@ router.get("/attempted/:studentId/:examId", (req, res) => {
         return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
-    db.query(
-        `
-        SELECT walkin_exam_id
-        FROM walkin_exams
-        WHERE walkin_exam_id = ?
-        LIMIT 1
-        `,
-        [req.params.examId],
-        (walkinErr, walkinRows) => {
-            if (walkinErr) return res.json({ attempted: false });
-            if (walkinRows && walkinRows.length > 0) {
-                return db.query(
-                    `SELECT status FROM students WHERE student_id = ? LIMIT 1`,
-                    [req.params.studentId],
-                    (statusErr, statusRows) => {
-                        if (statusErr) return res.json({ attempted: false });
-                        const isActive = String(statusRows?.[0]?.status || "").toUpperCase() === "ACTIVE";
-                        if (isActive) {
-                            return res.json({ attempted: false });
-                        }
-                        return db.query(
-                            `SELECT 1 FROM walkin_final_results WHERE student_id = ? AND exam_id = ? LIMIT 1`,
-                            [req.params.studentId, req.params.examId],
-                            (err2, rows2) => {
-                                if (err2) return res.json({ attempted: false });
-                                if (rows2.length > 0) {
-                                    return res.json({ attempted: true });
-                                }
-                                return db.query(
-                                    `SELECT 1
-                                     FROM walkin_student_answers
-                                     WHERE student_id = ?
-                                       AND exam_id = ?
-                                       AND COALESCE(is_submitted, FALSE) = TRUE
-                                     LIMIT 1`,
-                                    [req.params.studentId, req.params.examId],
-                                    (err3, rows3) => {
-                                        if (err3) return res.json({ attempted: false });
-                                        if (rows3 && rows3.length > 0) {
-                                            return res.json({
-                                                attempted: false,
-                                                processing: true,
-                                                message: "Result is processing. Please retry shortly."
-                                            });
-                                        }
-                                        return res.json({ attempted: false });
-                                    }
-                                );
+    if (isWalkinSessionStudent(req)) {
+        return db.query(
+            `
+            SELECT walkin_exam_id
+            FROM walkin_exams
+            WHERE walkin_exam_id = ?
+            LIMIT 1
+            `,
+            [req.params.examId],
+            (walkinErr, walkinRows) => {
+                if (walkinErr) return res.json({ attempted: false });
+                if (walkinRows && walkinRows.length > 0) {
+                    return db.query(
+                        `SELECT status FROM students WHERE student_id = ? LIMIT 1`,
+                        [req.params.studentId],
+                        (statusErr, statusRows) => {
+                            if (statusErr) return res.json({ attempted: false });
+                            const isActive = String(statusRows?.[0]?.status || "").toUpperCase() === "ACTIVE";
+                            if (isActive) {
+                                return res.json({ attempted: false });
                             }
-                        );
-                    }
-                );
-            }
-            db.query(
-                `SELECT result_id FROM regular_student_results WHERE student_id = ? AND exam_id = ?`,
-                [req.params.studentId, req.params.examId],
-                (err3, rows3) => {
-                    if (err3) return res.json({ attempted: false });
-                    return res.json({ attempted: rows3.length > 0 });
+                            return db.query(
+                                `SELECT 1 FROM walkin_final_results WHERE student_id = ? AND exam_id = ? LIMIT 1`,
+                                [req.params.studentId, req.params.examId],
+                                (err2, rows2) => {
+                                    if (err2) return res.json({ attempted: false });
+                                    if (rows2.length > 0) {
+                                        return res.json({ attempted: true });
+                                    }
+                                    return db.query(
+                                        `SELECT 1
+                                         FROM walkin_student_answers
+                                         WHERE student_id = ?
+                                           AND exam_id = ?
+                                           AND COALESCE(is_submitted, FALSE) = TRUE
+                                         LIMIT 1`,
+                                        [req.params.studentId, req.params.examId],
+                                        (err3, rows3) => {
+                                            if (err3) return res.json({ attempted: false });
+                                            if (rows3 && rows3.length > 0) {
+                                                return res.json({
+                                                    attempted: false,
+                                                    processing: true,
+                                                    message: "Result is processing. Please retry shortly."
+                                                });
+                                            }
+                                            return res.json({ attempted: false });
+                                        }
+                                    );
+                                }
+                            );
+                        }
+                    );
                 }
-            );
+                return res.json({ attempted: false });
+            }
+        );
+    }
+
+    db.query(
+        `SELECT result_id FROM regular_student_results WHERE student_id = ? AND exam_id = ?`,
+        [req.params.studentId, req.params.examId],
+        (err3, rows3) => {
+            if (err3) return res.json({ attempted: false });
+            return res.json({ attempted: rows3.length > 0 });
         }
     );
 });
@@ -1253,6 +1470,117 @@ router.get("/attempted/:studentId/:examId", (req, res) => {
 /* ================= FETCH regular_exam_questions ================= */
 router.get("/regular_exam_questions/:examId", (req, res) => {
     const examIdNum = Number(req.params.examId);
+    if (!isWalkinSessionStudent(req)) {
+        (async () => {
+            try {
+                const studentId = Number(req.session?.student?.studentId || 0);
+                const studentRows = await queryAsync(
+                    `SELECT status, course, student_type, background_type, college_id
+                     FROM students
+                     WHERE student_id = ?
+                     LIMIT 1`,
+                    [studentId]
+                );
+                const student = studentRows?.[0] || {};
+                const isActive = String(student.status || "").trim().toUpperCase() === "ACTIVE";
+                if (!isActive) {
+                    return res.status(403).json({ success: false, message: "Forbidden" });
+                }
+                if (isWalkinStudentType(student.student_type)) {
+                    return res.status(403).json({ success: false, message: "Forbidden" });
+                }
+
+                const latestRegularExam = await fetchLatestReadyRegularExamForCollege(student.college_id);
+                if (!latestRegularExam) {
+                    return res.status(404).json({ success: false, message: "No READY regular exam found." });
+                }
+                if (Number(latestRegularExam.exam_id || 0) !== Number(examIdNum)) {
+                    return res.status(403).json({ success: false, message: "Only the latest regular exam questions are accessible." });
+                }
+
+                const nowMs = Date.now();
+                const timing = getRegularExamTiming(latestRegularExam, nowMs);
+                if (!timing) {
+                    return res.status(500).json({ success: false, message: "Invalid regular exam schedule." });
+                }
+                if (timing.startsInSeconds > 0) {
+                    return res.status(409).json({
+                        success: false,
+                        code: "exam_not_started",
+                        startsAt: latestRegularExam.start_at,
+                        now: new Date(nowMs).toISOString(),
+                        startsInSeconds: timing.startsInSeconds,
+                        message: "Exam has not started yet."
+                    });
+                }
+                const existingAttempt = await fetchRegularStudentAttempt({ studentId, examId: examIdNum });
+                if (!existingAttempt) {
+                    return res.status(403).json({ success: false, message: "Start the exam first to access the question paper." });
+                }
+                if (timing.instructionWindowActive) {
+                    return res.status(409).json({
+                        success: false,
+                        code: "instruction_window_active",
+                        questionUnlockAt: timing.questionUnlockAt,
+                        unlockInSeconds: timing.unlockInSeconds,
+                        message: "Instructions are active. Questions will appear after the 10-minute start window closes."
+                    });
+                }
+                if (timing.submissionClosed) {
+                    return res.status(410).json({ success: false, message: "Exam window is closed." });
+                }
+
+                const allowedTechnicalSection = getRegularTechnicalSection(student.background_type);
+                let questionSetId = null;
+                try {
+                    const attempt = await ensureRegularStudentQuestionSet({
+                        studentId,
+                        examId: examIdNum
+                    });
+                    questionSetId = attempt.questionSetId;
+                } catch (questionSetError) {
+                    if (String(questionSetError?.message || "") === "NO_ACTIVE_REGULAR_QUESTION_SET") {
+                        return res.status(404).json({ success: false, message: "No active regular question set found." });
+                    }
+                    throw questionSetError;
+                }
+                const rows = await queryAsync(
+                    `
+                    SELECT 
+                        q.*,
+                        wc.testcases,
+                        wc.examples,
+                        COALESCE(wc.marks, ws.marks, wa.marks, 1) AS marks
+                    FROM regular_exam_questions q
+                    LEFT JOIN walkin_coding_questions wc ON wc.question_id = q.question_id
+                    LEFT JOIN walkin_stream_questions ws ON ws.question_id = q.question_id
+                    LEFT JOIN walkin_aptitude_questions wa ON wa.question_id = q.question_id
+                    WHERE q.exam_id = ?
+                      AND q.question_set_id = ?
+                      AND (
+                          UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
+                          OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, q.section_name))
+                          OR UPPER(COALESCE(q.section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN UPPER(COALESCE(q.section_name, '')) = 'APTITUDE' THEN 1
+                            WHEN UPPER(COALESCE(q.section_name, '')) IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED') THEN 2
+                            ELSE 3
+                        END,
+                        q.question_id
+                    `,
+                    [req.params.examId, questionSetId, allowedTechnicalSection || null]
+                );
+                return res.json(rows || []);
+            } catch (error) {
+                console.error("Fetch regular_exam_questions error:", error);
+                return res.json([]);
+            }
+        })();
+        return;
+    }
+
     db.query(
         `
         SELECT walkin_exam_id, stream, exam_status
@@ -1381,74 +1709,7 @@ router.get("/regular_exam_questions/:examId", (req, res) => {
                 return enforceAssignmentAndLoad(runWalkinQuestionQuery);
             }
 
-            (async () => {
-                try {
-                    const studentId = Number(req.session?.student?.studentId || 0);
-                    const studentRows = await queryAsync(
-                        `SELECT status, course, student_type
-                         FROM students
-                         WHERE student_id = ?
-                         LIMIT 1`,
-                        [studentId]
-                    );
-                    const student = studentRows?.[0] || {};
-                    const isActive = String(student.status || "").trim().toUpperCase() === "ACTIVE";
-                    if (!isActive) {
-                        return res.status(403).json({ success: false, message: "Forbidden" });
-                    }
-                    if (isWalkinStudentType(student.student_type)) {
-                        return res.status(403).json({ success: false, message: "Forbidden" });
-                    }
-
-                    const latestRegularExam = await fetchLatestReadyRegularExamForCourse(student.course);
-                    if (!latestRegularExam) {
-                        return res.status(404).json({ success: false, message: "No READY exam found for this course." });
-                    }
-                    if (Number(latestRegularExam.exam_id || 0) !== Number(examIdNum)) {
-                        return res.status(403).json({ success: false, message: "Only latest course exam regular_exam_questions are accessible." });
-                    }
-
-                    const nowMs = Date.now();
-                    const startAtMs = new Date(latestRegularExam.start_at).getTime();
-                    const endAtMs = new Date(latestRegularExam.end_at).getTime();
-                    if (Number.isFinite(startAtMs) && nowMs < startAtMs) {
-                        const startsInSeconds = Math.max(0, Math.ceil((startAtMs - nowMs) / 1000));
-                        return res.status(409).json({
-                            success: false,
-                            code: "exam_not_started",
-                            startsAt: latestRegularExam.start_at,
-                            now: new Date(nowMs).toISOString(),
-                            startsInSeconds,
-                            message: "Exam has not started yet."
-                        });
-                    }
-                    if (Number.isFinite(endAtMs) && nowMs > endAtMs) {
-                        return res.status(410).json({ success: false, message: "Exam window is closed." });
-                    }
-
-                    const rows = await queryAsync(
-                        `
-                        SELECT 
-                            q.*,
-                            wc.testcases,
-                            wc.examples,
-                            COALESCE(wc.marks, ws.marks, wa.marks, 1) AS marks
-                        FROM regular_exam_questions q
-                        LEFT JOIN walkin_coding_questions wc ON wc.question_id = q.question_id
-                        LEFT JOIN walkin_stream_questions ws ON ws.question_id = q.question_id
-                        LEFT JOIN walkin_aptitude_questions wa ON wa.question_id = q.question_id
-                        WHERE q.exam_id = ?
-                        ORDER BY q.question_id
-                        `,
-                        [req.params.examId]
-                    );
-                    return res.json(rows || []);
-                } catch (error) {
-                    console.error("Fetch regular_exam_questions error:", error);
-                    return res.json([]);
-                }
-            })();
-            return;
+            return res.json([]);
         }
     );
 });
@@ -1571,11 +1832,7 @@ router.get("/draft/:examId", async (req, res) => {
         return res.status(400).json({ success: false, message: "Invalid exam context" });
     }
     try {
-        const walkinRows = await queryAsync(
-            `SELECT walkin_exam_id FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
-            [examId]
-        );
-        const isWalkinExam = Boolean(walkinRows && walkinRows.length > 0);
+        const isWalkinExam = isWalkinSessionStudent(req);
         if (isWalkinExam) {
             await ensureWalkinAnswerSubmittedColumn();
             const rows = await queryAsync(
@@ -1589,7 +1846,16 @@ router.get("/draft/:examId", async (req, res) => {
             return res.json({ success: true, drafts: mapWalkinRowsToAnswers(rows) });
         }
 
-        return res.json({ success: true, drafts: [] });
+        const attempt = await fetchRegularStudentAttempt({ studentId, examId });
+        if (!attempt?.question_set_id) {
+            return res.json({ success: true, drafts: [] });
+        }
+        const drafts = await loadRegularSavedAnswers({
+            studentId,
+            examId,
+            questionSetId: Number(attempt.question_set_id || 0)
+        });
+        return res.json({ success: true, drafts });
     } catch (error) {
         console.error("Load exam drafts error:", error);
         return res.status(500).json({ success: false, message: "Could not load saved answers" });
@@ -1616,7 +1882,9 @@ router.post("/draft/autosave", async (req, res) => {
     }
 
     try {
-        const alreadySubmitted = await isExamSubmitted(studentId, examId);
+        const alreadySubmitted = await isExamSubmitted(studentId, examId, {
+            walkin: isWalkinSessionStudent(req)
+        });
         if (alreadySubmitted) {
             return res.json({
                 success: false,
@@ -1625,11 +1893,7 @@ router.post("/draft/autosave", async (req, res) => {
             });
         }
 
-        const walkinRows = await queryAsync(
-            `SELECT walkin_exam_id FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
-            [examId]
-        );
-        const isWalkinExam = Boolean(walkinRows && walkinRows.length > 0);
+        const isWalkinExam = isWalkinSessionStudent(req);
 
         if (isWalkinExam) {
             await ensureWalkinAnswerSectionColumn();
@@ -1673,8 +1937,48 @@ router.post("/draft/autosave", async (req, res) => {
 
             return res.json({ success: true, saved: normalizedAnswers.length });
         }
-        // Draft autosave is disabled for regular regular_exams.
-        return res.json({ success: true, saved: 0 });
+        const studentRows = await queryAsync(
+            `SELECT status, college_id
+             FROM students
+             WHERE student_id = ?
+             LIMIT 1`,
+            [studentId]
+        );
+        const regularStudent = studentRows?.[0] || {};
+        const latestRegularExam = await fetchLatestReadyRegularExamForCollege(regularStudent.college_id);
+        if (!latestRegularExam || Number(latestRegularExam.exam_id || 0) !== examId) {
+            return res.status(403).json({ success: false, message: "Autosave is allowed only for the latest regular exam." });
+        }
+
+        const attempt = await ensureRegularStudentQuestionSet({ studentId, examId });
+        const questionSetId = Number(attempt.questionSetId || 0);
+        const regularAnswers = normalizedAnswers
+            .filter((answer) => String(answer.qType || "MCQ").trim().toUpperCase() === "MCQ")
+            .map((answer) => ({
+                questionId: Number(answer.questionId || 0),
+                selectedOption: String(answer.selectedOption || "").trim().toUpperCase()
+            }))
+            .filter((answer) => answer.questionId > 0 && ["A", "B", "C", "D"].includes(answer.selectedOption));
+
+        await db.withTransaction(async (txQuery) => {
+            await txQuery(
+                `DELETE FROM regular_student_answers
+                 WHERE student_id = ?
+                   AND exam_id = ?
+                   AND question_set_id = ?`,
+                [studentId, examId, questionSetId]
+            );
+            for (const answer of regularAnswers) {
+                await txQuery(
+                    `INSERT INTO regular_student_answers
+                     (student_id, question_id, selected_option, exam_id, question_set_id)
+                     VALUES (?, ?, ?, ?, ?)`,
+                    [studentId, answer.questionId, answer.selectedOption, examId, questionSetId]
+                );
+            }
+        });
+
+        return res.json({ success: true, saved: regularAnswers.length });
     } catch (error) {
         console.error("Exam autosave error:", error);
         return res.status(500).json({ success: false, message: "Could not autosave answers" });
@@ -1698,15 +2002,6 @@ router.post("/submit", async (req, res) => {
     try {
         const examIdNum = Number(examId);
         let effectiveExamIdNum = examIdNum;
-        const walkinExamRows = await queryAsync(
-            `
-            SELECT walkin_exam_id, stream
-            FROM walkin_exams
-            WHERE walkin_exam_id = ?
-            LIMIT 1
-            `,
-            [examIdNum]
-        );
         const alreadySubmitted = await isExamSubmitted(Number(studentId), Number(examId));
         if (alreadySubmitted) {
             return res.json({
@@ -1721,10 +2016,18 @@ router.post("/submit", async (req, res) => {
             .replace(/[\s-]/g, "_");
         const isWalkin =
             normalizedStudentType === "WALKIN" || normalizedStudentType === "WALK_IN";
+        const walkinExamRows = isWalkin
+            ? await queryAsync(
+                `
+                SELECT walkin_exam_id, stream
+                FROM walkin_exams
+                WHERE walkin_exam_id = ?
+                LIMIT 1
+                `,
+                [examIdNum]
+            )
+            : [];
         const isWalkinExamId = walkinExamRows && walkinExamRows.length > 0;
-        if (isWalkinExamId && !isWalkin) {
-            return res.status(403).json({ success: false, message: "Forbidden" });
-        }
         if (isWalkin && !isWalkinExamId) {
             return res.status(403).json({ success: false, message: "Forbidden" });
         }
@@ -1747,7 +2050,8 @@ router.post("/submit", async (req, res) => {
         if (!submittedAnswers || submittedAnswers.length === 0) {
             const allowEmptyWalkinAutoSubmit =
                 isWalkin && isWalkinExamId && (autoSubmitReason === "TIME_OVER" || autoSubmitReason === "VIOLATION_LIMIT");
-            if (!allowEmptyWalkinAutoSubmit) {
+            const allowEmptyRegularSubmit = !isWalkin;
+            if (!allowEmptyWalkinAutoSubmit && !allowEmptyRegularSubmit) {
                 return res.status(400).json({ success: false, message: "No answers available to submit." });
             }
             submittedAnswers = [];
@@ -1787,12 +2091,11 @@ router.post("/submit", async (req, res) => {
         }
 
         let effectiveStudentExamId = null;
-        let regularDurationMinutes = null;
-        let regularStartedAt = null;
+        let regularQuestionSetId = null;
         let walkinExpiredBeyondGrace = false;
         if (!isWalkin) {
             const regularStudentRows = await queryAsync(
-                `SELECT status, course
+                `SELECT status, college_id
                  FROM students
                  WHERE student_id = ?
                  LIMIT 1`,
@@ -1803,117 +2106,65 @@ router.post("/submit", async (req, res) => {
             if (!isStudentActive) {
                 return res.status(403).json({ success: false, message: "Forbidden" });
             }
-            const studentCourse = String(regularStudent.course || "").trim();
-            const latestRegularExam = await fetchLatestReadyRegularExamForCourse(studentCourse);
+            const latestRegularExam = await fetchLatestReadyRegularExamForCollege(regularStudent.college_id);
             if (!latestRegularExam) {
-                return res.status(404).json({ success: false, message: "No READY exam found for this course." });
+                return res.status(404).json({ success: false, message: "No READY regular exam found." });
             }
             if (Number(latestRegularExam.exam_id || 0) !== Number(examId)) {
-                return res.status(403).json({ success: false, message: "Submit allowed only for latest course exam." });
+                return res.status(403).json({ success: false, message: "Submit is allowed only for the latest regular exam." });
             }
 
-            const regularExamRows = await queryAsync(
-                `SELECT exam_id, exam_status, start_at, end_at
-                 FROM regular_exams
-                 WHERE exam_id = ?
-                 LIMIT 1`,
-                [examId]
-            );
-            const regularExam = regularExamRows?.[0] || null;
-            if (!regularExam) {
-                return res.status(404).json({ success: false, message: "Exam not found" });
+            const regularTiming = getRegularExamTiming(latestRegularExam, Date.now());
+            if (!regularTiming) {
+                return res.status(500).json({ success: false, message: "Invalid regular exam schedule." });
             }
-            if (String(regularExam.exam_status || "").trim().toUpperCase() !== "READY") {
-                return res.status(400).json({ success: false, message: "Exam is not ready" });
-            }
-            const regularStartMs = new Date(regularExam.start_at).getTime();
-            const regularEndMs = new Date(regularExam.end_at).getTime();
-            const regularNowMs = Date.now();
-            if (Number.isFinite(regularStartMs) && regularNowMs < regularStartMs) {
+            if (regularTiming.startsInSeconds > 0) {
                 return res.status(400).json({ success: false, message: "Exam has not started yet." });
             }
-            if (Number.isFinite(regularEndMs) && regularNowMs > regularEndMs) {
-                return res.status(400).json({ success: false, message: "Exam time is over. Submission window closed." });
-            }
 
-            await ensureRegularStudentExamTable();
             const requestedStudentExamId = Number(studentExamId || 0);
-            let mapRows = [];
-            if (requestedStudentExamId > 0) {
-                mapRows = await queryAsync(
-                    `SELECT student_exam_id
-                     FROM regular_student_exam
-                     WHERE student_exam_id = ?
-                       AND student_id = ?
-                       AND exam_id = ?
-                     LIMIT 1`,
-                    [requestedStudentExamId, studentId, examId]
-                );
-            } else {
-                mapRows = await queryAsync(
-                    `SELECT student_exam_id
-                     FROM regular_student_exam
-                     WHERE student_id = ?
-                       AND exam_id = ?
-                     LIMIT 1`,
-                    [studentId, examId]
-                );
+            try {
+                const regularAttempt = await ensureRegularStudentQuestionSet({
+                    studentId,
+                    examId,
+                    requestedStudentExamId
+                });
+                effectiveStudentExamId = regularAttempt.studentExamId;
+                regularQuestionSetId = regularAttempt.questionSetId;
+            } catch (questionSetError) {
+                if (String(questionSetError?.message || "") === "NO_ACTIVE_REGULAR_QUESTION_SET") {
+                    return res.status(404).json({ success: false, message: "No active regular question set found." });
+                }
+                throw questionSetError;
             }
 
-            if (!mapRows || mapRows.length === 0) {
-                try {
-                    await queryAsync(
-                        `INSERT INTO regular_student_exam (student_id, exam_id) VALUES (?, ?)`,
-                        [studentId, examId]
-                    );
-                } catch (insertError) {
-                    const duplicate =
-                        Number(insertError?.errno) === 1062 ||
-                        String(insertError?.code || "").toUpperCase() === "23505" ||
-                        /duplicate key/i.test(String(insertError?.message || ""));
-                    if (!duplicate) throw insertError;
-                }
-                mapRows = await queryAsync(
-                    `SELECT student_exam_id
-                     FROM regular_student_exam
-                     WHERE student_id = ?
-                       AND exam_id = ?
-                     LIMIT 1`,
-                    [studentId, examId]
-                );
+            const existingAttempt = await fetchRegularStudentAttempt({
+                studentId,
+                examId,
+                requestedStudentExamId
+            });
+            if (!existingAttempt) {
+                return res.status(403).json({ success: false, message: "Start the exam first to submit." });
             }
-            effectiveStudentExamId = Number(mapRows?.[0]?.student_exam_id || 0) || null;
-            await queryAsync(
-                `UPDATE regular_student_exam
-                 SET started_at = COALESCE(started_at, NOW())
-                 WHERE student_id = ?
-                   AND exam_id = ?`,
-                [studentId, examId]
-            );
+            regularQuestionSetId = Number(existingAttempt?.question_set_id || regularQuestionSetId || 0) || null;
+            if (regularTiming.instructionWindowActive) {
+                return res.status(400).json({ success: false, message: "Question paper is not unlocked yet." });
+            }
+            if (regularTiming.submissionClosed) {
+                autoSubmitReason = autoSubmitReason || "TIME_OVER";
+            }
 
-            const timerRows = await queryAsync(
-                `SELECT rse.started_at, e.duration_minutes
-                 FROM regular_student_exam rse
-                 JOIN regular_exams e ON e.exam_id = rse.exam_id
-                 WHERE rse.student_id = ?
-                   AND rse.exam_id = ?
-                 LIMIT 1`,
-                [studentId, examId]
-            );
-            regularStartedAt = timerRows?.[0]?.started_at || null;
-            regularDurationMinutes = Number(timerRows?.[0]?.duration_minutes || 0) || null;
-            if (regularDurationMinutes && regularDurationMinutes > 0 && regularStartedAt) {
-                const expiryRows = await queryAsync(
-                    `SELECT NOW() > ($1::timestamp + ($2::int * INTERVAL '1 minute')) AS expired`,
-                    [regularStartedAt, regularDurationMinutes]
-                );
-                const expired = Number(expiryRows?.[0]?.expired || 0) === 1;
-                if (expired) {
-                    return res.status(400).json({
-                        success: false,
-                        message: "Exam time is over. Submission window closed."
-                    });
-                }
+            const savedRegularRows = await loadRegularSavedAnswers({
+                studentId: Number(studentId),
+                examId: Number(examId),
+                questionSetId: regularQuestionSetId
+            });
+            submittedAnswers = mergeRegularSubmittedAnswers({
+                payloadAnswers: submittedAnswers,
+                savedRows: savedRegularRows
+            });
+            if (!submittedAnswers.length) {
+                return res.status(400).json({ success: false, message: "No answers available to submit." });
             }
         }
         if (isWalkin) {
@@ -2052,13 +2303,23 @@ router.post("/submit", async (req, res) => {
 
         const regularSql = `
             INSERT INTO regular_student_answers
-            (student_id, question_id, selected_option, exam_id)
-            VALUES (?, ?, ?, ?)
+            (student_id, question_id, selected_option, exam_id, question_set_id)
+            VALUES (?, ?, ?, ?, ?)
         `;
 
         if (isWalkin) {
             effectiveExamIdNum = examIdNum;
             req.session.student.walkinExamId = examIdNum;
+        }
+
+        if (!isWalkin && regularQuestionSetId) {
+            await queryAsync(
+                `DELETE FROM regular_student_answers
+                 WHERE student_id = ?
+                   AND exam_id = ?
+                   AND question_set_id = ?`,
+                [studentId, examId, regularQuestionSetId]
+            );
         }
 
         for (const a of submittedAnswers) {
@@ -2115,7 +2376,8 @@ router.post("/submit", async (req, res) => {
                         studentId,
                         a.question_id,
                         a.selected_option,
-                        examId
+                        examId,
+                        regularQuestionSetId
                     ]);
                 }
             }
@@ -2124,9 +2386,15 @@ router.post("/submit", async (req, res) => {
         if (!isWalkin) {
             await ensureResultsSubmittedAtColumn();
             await queryAsync(
-                `INSERT INTO regular_student_results (student_id, exam_id, attempt_status, submitted_at)
-                 VALUES (?, ?, 'SUBMITTED', NOW())`,
+                `DELETE FROM regular_student_results
+                 WHERE student_id = ?
+                   AND exam_id = ?`,
                 [studentId, examId]
+            );
+            await queryAsync(
+                `INSERT INTO regular_student_results (student_id, exam_id, attempt_status, submitted_at, question_set_id)
+                 VALUES (?, ?, 'SUBMITTED', NOW(), ?)`,
+                [studentId, examId, regularQuestionSetId]
             );
         }
         await queryAsync(
@@ -2213,13 +2481,15 @@ router.post("/feedback", async (req, res) => {
     }
 
     try {
-        const walkinRows = await queryAsync(
-            `SELECT walkin_exam_id
-             FROM walkin_exams
-             WHERE walkin_exam_id = ?
-             LIMIT 1`,
-            [examId]
-        );
+        const walkinRows = isWalkinSessionStudent(req)
+            ? await queryAsync(
+                `SELECT walkin_exam_id
+                 FROM walkin_exams
+                 WHERE walkin_exam_id = ?
+                 LIMIT 1`,
+                [examId]
+            )
+            : [];
         if (walkinRows?.length) {
             const processingState = await getWalkinResultProcessingState(studentId, examId);
             if (!processingState.ready) {
@@ -2274,23 +2544,21 @@ router.post("/feedback", async (req, res) => {
             return res.status(400).json({ success: false, message: "Feedback can be submitted only after exam submission." });
         }
 
-        await ensureRegularExamFeedbackTable();
+        await ensureResultsFeedbackColumns();
         await queryAsync(
-            `INSERT INTO regular_exam_feedback
-             (student_id, exam_id, question_text, feedback_text, submission_mode)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT (student_id, exam_id)
-             DO UPDATE SET
-                question_text = EXCLUDED.question_text,
-                feedback_text = EXCLUDED.feedback_text,
-                submission_mode = EXCLUDED.submission_mode,
-                submitted_at = NOW()`,
+            `UPDATE regular_student_results
+             SET feedback_question_text = ?,
+                 feedback_text = ?,
+                 feedback_submission_mode = ?
+             WHERE student_id = ?
+               AND exam_id = ?`,
             [
-                studentId,
-                examId,
                 questionText || "Tell us about the exam, question quality, and overall difficulty.",
                 feedbackText,
                 submissionMode
+                ,
+                studentId,
+                examId
             ]
         );
 
@@ -2313,15 +2581,16 @@ router.post("/result", (req, res) => {
         return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
-    db.query(
-        `
-        SELECT walkin_exam_id, stream::text AS stream, stream_code::text AS stream_code
-        FROM walkin_exams
-        WHERE walkin_exam_id = ?
-        LIMIT 1
-        `,
-        [examId],
-        (walkinErr, walkinRows) => {
+    if (isWalkinSessionStudent(req)) {
+        return db.query(
+            `
+            SELECT walkin_exam_id, stream::text AS stream, stream_code::text AS stream_code
+            FROM walkin_exams
+            WHERE walkin_exam_id = ?
+            LIMIT 1
+            `,
+            [examId],
+            (walkinErr, walkinRows) => {
             if (walkinErr) {
                 console.error("Walk-in result exam lookup error:", walkinErr);
                 return res.json({ success: false, message: "Server error" });
@@ -2412,12 +2681,50 @@ router.post("/result", (req, res) => {
                         return res.json({ success: false, message: "Server error" });
                     }
                 })();
-                return;
-            }
+                    return;
+                }
 
+                return res.json({ success: false, message: "Walk-in exam not found" });
+            }
+        );
+    }
+
+    db.query(
+        `
+        SELECT s.background_type,
+               COALESCE(r.question_set_id, rse.question_set_id) AS question_set_id
+        FROM students s
+        LEFT JOIN regular_student_results r
+          ON r.student_id = s.student_id
+         AND r.exam_id = ?
+        LEFT JOIN regular_student_exam rse
+          ON rse.student_id = s.student_id
+         AND rse.exam_id = ?
+        WHERE s.student_id = ?
+        LIMIT 1
+        `,
+        [examId, examId, studentId],
+        (bgErr, bgRows) => {
+            if (bgErr) {
+                console.error("Result background error:", bgErr);
+                return res.json({ success: false, message: "Server error" });
+            }
+            const allowedTechnicalSection = getRegularTechnicalSection(bgRows?.[0]?.background_type);
+            const questionSetId = Number(bgRows?.[0]?.question_set_id || 0) || null;
+            if (!questionSetId) {
+                return res.json({ success: false, message: "Regular question set not found" });
+            }
             db.query(
-                `SELECT COUNT(*) AS total FROM regular_exam_questions WHERE exam_id = ?`,
-                [examId],
+                `SELECT COUNT(*) AS total
+                 FROM regular_exam_questions
+                 WHERE exam_id = ?
+                   AND question_set_id = ?
+                   AND (
+                       UPPER(COALESCE(section_name, '')) = 'APTITUDE'
+                       OR UPPER(COALESCE(section_name, '')) = UPPER(COALESCE(?, section_name))
+                       OR UPPER(COALESCE(section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
+                   )`,
+                [examId, questionSetId, allowedTechnicalSection || null],
                 (err, totalRows) => {
             if (err) {
                 console.error("Result total error:", err);
@@ -2433,10 +2740,18 @@ router.post("/result", (req, res) => {
                 `
                 SELECT COUNT(*) AS correct
                 FROM regular_student_answers sa
-                JOIN regular_exam_questions q ON sa.question_id = q.question_id
+                JOIN regular_exam_questions q
+                  ON sa.question_id = q.question_id
+                 AND q.question_set_id = COALESCE(sa.question_set_id, ?)
                 WHERE sa.student_id = ? AND sa.exam_id = ? AND sa.selected_option = q.correct_answer
+                  AND COALESCE(sa.question_set_id, ?) = ?
+                  AND (
+                      UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
+                      OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, q.section_name))
+                      OR UPPER(COALESCE(q.section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
+                  )
                 `,
-                [studentId, examId],
+                [questionSetId, studentId, examId, questionSetId, questionSetId, allowedTechnicalSection || null],
                 (err2, correctRows) => {
                     if (err2) {
                         console.error("Result correct error:", err2);

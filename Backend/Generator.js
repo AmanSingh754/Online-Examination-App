@@ -80,6 +80,67 @@ Rules:
 `;
 }
 
+function buildRegularAptitudePrompt(_, __, count, avoidList) {
+    const avoidText = avoidList && avoidList.length > 0
+        ? `Avoid these exact question texts:\n${avoidList.map(q => `- ${q}`).join("\n")}\n`
+        : "";
+
+    return `
+Generate ${count} aptitude MCQ questions for a regular college scholarship exam.
+This aptitude section is common for both tech and non-tech students.
+Cover quantitative aptitude, logical reasoning, percentages, ratios, averages, work and time, time-speed-distance, probability, number series, and basic analytical reasoning.
+Difficulty should be MEDIUM.
+${avoidText}
+Return ONLY a JSON array of objects with these exact keys:
+question_text, option_a, option_b, option_c, option_d, correct_answer
+Rules:
+- correct_answer must be one of: A, B, C, D
+- exactly 4 options, only one correct
+- no markdown, no extra text
+- avoid technical or programming-specific content
+`;
+}
+
+function buildRegularTechnicalBasicPrompt(_, __, count, avoidList) {
+    const avoidText = avoidList && avoidList.length > 0
+        ? `Avoid these exact question texts:\n${avoidList.map(q => `- ${q}`).join("\n")}\n`
+        : "";
+
+    return `
+Generate ${count} basic computer MCQ questions for non-tech regular college students.
+Cover beginner-friendly topics only: computer fundamentals, hardware vs software, operating systems basics, MS Office basics, internet and email basics, cybersecurity basics, file types, simple networking basics, and everyday digital literacy.
+Difficulty should be EASY.
+${avoidText}
+Return ONLY a JSON array of objects with these exact keys:
+question_text, option_a, option_b, option_c, option_d, correct_answer
+Rules:
+- correct_answer must be one of: A, B, C, D
+- exactly 4 options, only one correct
+- no markdown, no extra text
+- do not ask coding, programming, DBMS, DSA, or deep technical questions
+`;
+}
+
+function buildRegularTechnicalAdvancedPrompt(_, __, count, avoidList) {
+    const avoidText = avoidList && avoidList.length > 0
+        ? `Avoid these exact question texts:\n${avoidList.map(q => `- ${q}`).join("\n")}\n`
+        : "";
+
+    return `
+Generate ${count} advanced computer and IT MCQ questions for tech regular college students.
+Cover deeper technical topics such as programming fundamentals, OOP basics, DBMS, operating systems, computer networks, SQL, web basics, data structures, software engineering, and debugging logic.
+Difficulty should be MEDIUM to HARD.
+${avoidText}
+Return ONLY a JSON array of objects with these exact keys:
+question_text, option_a, option_b, option_c, option_d, correct_answer
+Rules:
+- correct_answer must be one of: A, B, C, D
+- exactly 4 options, only one correct
+- no markdown, no extra text
+- focus on conceptual technical understanding rather than long code snippets
+`;
+}
+
 function buildStreamPrompt(stream, difficulty, count, avoidList) {
     const avoidText = avoidList && avoidList.length > 0
         ? `Avoid these exact question texts:\n${avoidList.map(q => `- ${q}`).join("\n")}\n`
@@ -227,6 +288,62 @@ async function generateQuestionsForCourse(course, count = 10) {
     return generateQuestionsForSource(course, difficulty, count, buildPrompt);
 }
 
+async function generateRegularExamQuestions(aptitudeCount = 20, technicalBasicCount = 30, technicalAdvancedCount = 30) {
+    const normalizedAptitudeCount = Math.max(0, Number(aptitudeCount) || 0);
+    const normalizedTechnicalBasicCount = Math.max(0, Number(technicalBasicCount) || 0);
+    const normalizedTechnicalAdvancedCount = Math.max(0, Number(technicalAdvancedCount) || 0);
+    const questions = [];
+    if (normalizedAptitudeCount > 0) {
+        const aptitudeQuestions = await generateQuestionsForSource(
+            "regular aptitude",
+            "MEDIUM",
+            normalizedAptitudeCount,
+            buildRegularAptitudePrompt
+        );
+        aptitudeQuestions.forEach((question) => {
+            questions.push({
+                ...question,
+                section_name: "APTITUDE",
+                question_type: "MCQ"
+            });
+        });
+    }
+
+    if (normalizedTechnicalBasicCount > 0) {
+        const technicalBasicQuestions = await generateQuestionsForSource(
+            "TECHNICAL_BASIC",
+            "EASY",
+            normalizedTechnicalBasicCount,
+            buildRegularTechnicalBasicPrompt
+        );
+        technicalBasicQuestions.forEach((question) => {
+            questions.push({
+                ...question,
+                section_name: "TECHNICAL_BASIC",
+                question_type: "MCQ"
+            });
+        });
+    }
+
+    if (normalizedTechnicalAdvancedCount > 0) {
+        const technicalAdvancedQuestions = await generateQuestionsForSource(
+            "TECHNICAL_ADVANCED",
+            "HARD",
+            normalizedTechnicalAdvancedCount,
+            buildRegularTechnicalAdvancedPrompt
+        );
+        technicalAdvancedQuestions.forEach((question) => {
+            questions.push({
+                ...question,
+                section_name: "TECHNICAL_ADVANCED",
+                question_type: "MCQ"
+            });
+        });
+    }
+
+    return questions;
+}
+
 async function generateQuestionsForStream(stream, count = 10) {
     const difficulty = getDifficultyByCourse(stream);
     return generateQuestionsForSource(stream, difficulty, count, buildStreamPrompt);
@@ -234,5 +351,6 @@ async function generateQuestionsForStream(stream, count = 10) {
 
 module.exports = {
     generateQuestionsForCourse,
+    generateRegularExamQuestions,
     generateQuestionsForStream
 };

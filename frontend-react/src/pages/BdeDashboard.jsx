@@ -1093,7 +1093,10 @@ function BdeDashboard() {
                             </tr>
                           )}
                           {filteredRecentStudents.map((student, index) => (
-                            <tr key={`bde-student-recent-${student.student_id}`}>
+                            <tr
+                              key={`bde-student-recent-${student.student_id}`}
+                              className={String(student.student_status || student.status || "").toUpperCase() === "INACTIVE" ? "student-row-inactive" : ""}
+                            >
                               <td>{index + 1}</td>
                               <td>{student.student_id}</td>
                               <td>{student.name}</td>
@@ -1387,7 +1390,10 @@ function BdeDashboard() {
                             </tr>
                           )}
                           {filteredEnrolledStudents.map((student, index) => (
-                            <tr key={`bde-student-all-${student.student_id}`}>
+                            <tr
+                              key={`bde-student-all-${student.student_id}`}
+                              className={String(student.student_status || student.status || "").toUpperCase() === "INACTIVE" ? "student-row-inactive" : ""}
+                            >
                               <td>{index + 1}</td>
                               <td>{student.student_id}</td>
                               <td>{student.name || "--"}</td>

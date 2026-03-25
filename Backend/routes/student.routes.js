@@ -2,8 +2,6 @@ const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const { getWalkinStreamCodeOrDefault, getWalkinStreamLabel } = require("../utils/walkinStream");
-const { isAtLeastAge } = require("../utils/ageValidation");
-const { getBackgroundType } = require("../utils/courseBackground");
 let studentStartupSchemaSyncAttempted = false;
 
 const getWalkinDurationMinutes = (streamCode) => {
@@ -114,97 +112,11 @@ router.post("/login", (req, res) => {
 });
 
 /* ================= STUDENT REGISTER API ================= */
-router.post("/register", (req, res) => {
-    const {
-        name,
-        email,
-        phone,
-        dob,
-        course,
-        collegeId,
-        password
-    } = req.body;
-
-    const cleanName = String(name || "").trim();
-    const cleanEmail = String(email || "").trim();
-    const cleanPhone = String(phone || "").trim();
-    const cleanDob = String(dob || "").trim();
-    const cleanCourse = String(course || "").trim();
-    const backgroundType = getBackgroundType(cleanCourse);
-    const cleanCollegeId = String(collegeId || "").trim();
-    const cleanPassword = String(password || "");
-
-    if (!cleanName || !cleanEmail || !cleanPhone || !cleanDob || !cleanCourse || !cleanCollegeId || !cleanPassword) {
-        return res.json({ success: false, message: "Missing required fields" });
-    }
-    if (!isAtLeastAge(cleanDob, 18)) {
-        return res.json({ success: false, message: "Student must be at least 18 years old." });
-    }
-    if (!Number.isFinite(Number(cleanCollegeId)) || Number(cleanCollegeId) <= 0) {
-        return res.json({ success: false, message: "Invalid college selection" });
-    }
-
-    db.query(
-        `SELECT college_id FROM college WHERE college_id = ? LIMIT 1`,
-        [Number(cleanCollegeId)],
-        (collegeErr, collegeRows) => {
-            if (collegeErr) {
-                console.error("Register college validation error:", collegeErr);
-                return res.json({ success: false, message: "Server error" });
-            }
-            if (!collegeRows || collegeRows.length === 0) {
-                return res.json({ success: false, message: "Selected college not found" });
-            }
-
-            db.query(
-                `SELECT student_id FROM students WHERE email_id = ?`,
-                [cleanEmail],
-                (err, rows) => {
-                    if (err) {
-                        console.error("Register lookup error:", err);
-                        return res.json({ success: false, message: "Server error" });
-                    }
-
-                    if (rows.length > 0) {
-                        return res.json({ success: false, message: "Email already registered" });
-                    }
-
-                    db.query(
-                        `
-                        INSERT INTO students
-                        (name, email_id, contact_number, dob, course, background_type, college_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        RETURNING student_id
-                        `,
-                        [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, backgroundType || null, cleanCollegeId],
-                        (err2, result) => {
-                            if (err2) {
-                                console.error("Register student error:", err2);
-                                return res.json({ success: false, message: "Registration failed" });
-                            }
-
-                            const newStudentId = result?.insertId;
-                            db.query(
-                                `
-                                INSERT INTO student_credentials
-                                (student_id, password)
-                                VALUES (?, ?)
-                                `,
-                                [newStudentId, cleanPassword],
-                                (err3) => {
-                                    if (err3) {
-                                        console.error("Register credentials error:", err3);
-                                        return res.json({ success: false, message: "Registration failed" });
-                                    }
-                                    return res.json({ success: true, studentId: newStudentId });
-                                }
-                            );
-                        }
-                    );
-                }
-            );
-        }
-    );
+router.post("/register", (_req, res) => {
+    return res.status(403).json({
+        success: false,
+        message: "Student self-registration is closed. Contact your admin for account creation."
+    });
 });
 
 router.get("/colleges", (req, res) => {
@@ -332,31 +244,45 @@ router.get("/exams/:studentId", (req, res) => {
             const sql = `
                 SELECT 
                     e.exam_id,
-                    (e.course || ' Exam') AS exam_name,
+                    'Regular Exam' AS exam_name,
                     (e.start_at::timestamp)::date AS exam_start_date,
                     (e.end_at::timestamp)::date AS exam_end_date,
                     (e.start_at::timestamp)::time AS start_time,
                     (e.end_at::timestamp)::time AS end_time,
-                    e.course,
+                    'Regular' AS course,
                     CASE WHEN NOW() >= e.start_at THEN TRUE ELSE FALSE END AS can_start,
                     GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (e.start_at - NOW()))))::int AS starts_in_seconds
-                FROM students s
-                JOIN regular_exams e ON LOWER(TRIM(e.course)) = LOWER(TRIM(s.course))
-                WHERE s.student_id = ?
-                  AND e.exam_status = 'READY'
+                FROM regular_exams e
+                JOIN students self
+                  ON self.student_id = ?
+                WHERE e.exam_status = 'READY'
                   AND COALESCE(e.is_deleted, FALSE) = FALSE
                   AND NOW() <= e.end_at
+                  AND (e.college_id = self.college_id OR e.college_id IS NULL)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM regular_question_sets qs
+                      WHERE qs.exam_id = e.exam_id
+                        AND qs.set_status = 'ACTIVE'
+                  )
+                  AND EXISTS (
+                      SELECT 1
+                      FROM students s
+                      WHERE s.student_id = ?
+                        AND s.status = 'ACTIVE'
+                  )
+                  AND e.exam_status = 'READY'
                   AND NOT EXISTS (
                       SELECT 1
                       FROM regular_student_results r
-                      WHERE r.student_id = s.student_id
+                      WHERE r.student_id = ?
                         AND r.exam_id = e.exam_id
                   )
                 ORDER BY e.start_at DESC NULLS LAST, e.exam_id DESC
                 LIMIT 1
             `;
 
-            return db.query(sql, [studentId], (err6, rows) => {
+            return db.query(sql, [studentId, studentId, studentId], (err6, rows) => {
                 if (err6) {
                     console.error("Available exams error:", err6);
                     return res.json([]);
@@ -422,11 +348,11 @@ router.get("/attempted-exams/:studentId", (req, res) => {
                 r.exam_id,
                 CASE
                     WHEN we.walkin_exam_id IS NOT NULL THEN CONCAT(we.stream, ' Walk-in Exam')
-                    ELSE CONCAT(COALESCE(e.course, s.course), ' Exam')
+                    ELSE 'Regular Exam'
                 END AS exam_name,
                 NULL AS exam_start_date,
                 NULL AS exam_end_date,
-                COALESCE(e.course, we.stream, s.course) AS course,
+                COALESCE(we.stream, 'Regular') AS course,
                 r.attempt_status,
                 r.result_id AS sort_id
             FROM regular_student_results r

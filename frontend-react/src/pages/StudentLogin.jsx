@@ -22,6 +22,7 @@ function StudentLogin() {
     localStorage.removeItem("studentDob");
     localStorage.removeItem("studentCourse");
     localStorage.removeItem("studentCollegeName");
+    localStorage.removeItem("studentType");
   }, []);
 
   const handleSubmit = async (event) => {
@@ -58,6 +59,7 @@ function StudentLogin() {
       if (data.phone) localStorage.setItem("studentContact", data.phone);
       if (data.dob) localStorage.setItem("studentDob", data.dob);
       if (data.course) localStorage.setItem("studentCourse", data.course);
+      localStorage.setItem("studentType", data.studentType || "REGULAR");
       if (data.collegeName) {
         localStorage.setItem("studentCollegeName", data.collegeName);
       }
@@ -109,7 +111,7 @@ function StudentLogin() {
 
         <section className="auth-card">
           <h2>Student Login</h2>
-          <p className="auth-meta">Use the email you registered with.</p>
+          <p className="auth-meta">Use the credentials shared by your admin.</p>
           <form autoComplete="off" onSubmit={handleSubmit}>
            <input
   type="text"
@@ -160,7 +162,7 @@ function StudentLogin() {
           {error && <p className="auth-help">{error}</p>}
           {!error && (
             <p className="auth-help">
-              Need an account? Register here
+              Need an account? Contact your admin. Self-registration is closed.
             </p>
           )}
         </section>
