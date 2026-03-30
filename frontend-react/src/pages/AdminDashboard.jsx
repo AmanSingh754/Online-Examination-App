@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
+import AdminAnalyticsSection from "./admin-dashboard/AdminAnalyticsSection.jsx";
 
 const TECH_REGULAR_COURSES = [
   "BTech",
@@ -449,7 +450,6 @@ function AdminDashboard() {
 
   const [exams, setExams] = useState([]);
   const [studentCount, setStudentCount] = useState(0);
-  const [thisMonthRegistrations, setThisMonthRegistrations] = useState(0);
   const [registrationMonthOffset, setRegistrationMonthOffset] = useState(0);
   const [registrationTrend, setRegistrationTrend] = useState([]);
   const [regularResultedCount, setRegularResultedCount] = useState(0);
@@ -473,6 +473,7 @@ function AdminDashboard() {
     bdeName: "",
     bdeNameOther: ""
   });
+  const [walkinCreateOpen, setWalkinCreateOpen] = useState(false);
   const [walkinStatus, setWalkinStatus] = useState("");
   const [walkinCredentials, setWalkinCredentials] = useState(null);
   const [walkinCreateSubmitting, setWalkinCreateSubmitting] = useState(false);
@@ -491,6 +492,7 @@ function AdminDashboard() {
   const [regularQuestionSheetData, setRegularQuestionSheetData] = useState(null);
   const [regularQuestionSheetLoading, setRegularQuestionSheetLoading] = useState(false);
   const [regularQuestionSheetError, setRegularQuestionSheetError] = useState("");
+  const [regularCreateOpen, setRegularCreateOpen] = useState(false);
   const [walkinQuestionEditor, setWalkinQuestionEditor] = useState({
     open: false,
     category: "",
@@ -536,7 +538,6 @@ function AdminDashboard() {
   const [walkinReviewView, setWalkinReviewView] = useState("summary");
   const [walkinResultsSearch, setWalkinResultsSearch] = useState("");
   const [walkinResultsStreamFilter, setWalkinResultsStreamFilter] = useState("ALL");
-  const [walkinResultsExamFilter, setWalkinResultsExamFilter] = useState("ALL");
   const [walkinStudentsSearch, setWalkinStudentsSearch] = useState("");
   const [walkinStudentsStreamFilter, setWalkinStudentsStreamFilter] = useState("ALL");
   const [bdeStudentsSearch, setBdeStudentsSearch] = useState("");
@@ -547,9 +548,8 @@ function AdminDashboard() {
   const [regularStudentsSearch, setRegularStudentsSearch] = useState("");
   const [regularStudentsCourseFilter, setRegularStudentsCourseFilter] = useState("ALL");
   const [regularResultsSearch, setRegularResultsSearch] = useState("");
-  const [regularResultsExamFilter, setRegularResultsExamFilter] = useState("ALL");
   const [examListSearch, setExamListSearch] = useState("");
-  const [examListStatusFilter, setExamListStatusFilter] = useState("ALL");
+  const examListStatusFilter = "ALL";
   const [studentProfilesSearch, setStudentProfilesSearch] = useState("");
   const [studentProfilesTypeFilter, setStudentProfilesTypeFilter] = useState("ALL");
   const [studentProfilesCourseFilter, setStudentProfilesCourseFilter] = useState("ALL");
@@ -900,7 +900,6 @@ function AdminDashboard() {
         throw new Error(data.message || "Could not load dashboard stats");
       }
       setStudentCount(Number(data.studentCount || 0));
-      setThisMonthRegistrations(Number(data.thisMonthRegistrations || 0));
       setRegistrationTrend(Array.isArray(data.registrationTrend) ? data.registrationTrend : []);
       setRegularResultedCount(Number(data.regularResultedCount || 0));
       setWalkinResultedCount(Number(data.walkinResultedCount || 0));
@@ -931,7 +930,6 @@ function AdminDashboard() {
         );
 
         setStudentCount(Number(studentsData.total || 0));
-        setThisMonthRegistrations(0);
         setRegistrationTrend([]);
         setRegularResultedCount(regularStudentIds.size);
         setWalkinResultedCount(walkinStudentIds.size);
@@ -942,7 +940,6 @@ function AdminDashboard() {
         }
         console.error("Load dashboard fallback error:", fallbackError);
         setStudentCount(0);
-        setThisMonthRegistrations(0);
         setRegistrationTrend([]);
         setRegularResultedCount(0);
         setWalkinResultedCount(0);
@@ -2178,18 +2175,12 @@ function AdminDashboard() {
         String(row.stream || "").toLowerCase().includes(query);
       const matchStream =
         walkinResultsStreamFilter === "ALL" || String(row.stream || "") === walkinResultsStreamFilter;
-      const matchExam =
-        walkinResultsExamFilter === "ALL" || String(row.exam_id || "") === walkinResultsExamFilter;
-      return matchQuery && matchStream && matchExam;
+      return matchQuery && matchStream;
     });
-  }, [walkinResults, walkinResultsSearch, walkinResultsStreamFilter, walkinResultsExamFilter]);
+  }, [walkinResults, walkinResultsSearch, walkinResultsStreamFilter]);
   const walkinResultStreams = useMemo(() => {
     const source = Array.isArray(walkinResults) ? walkinResults : [];
     return [...new Set(source.map((row) => String(row.stream || "")).filter(Boolean))];
-  }, [walkinResults]);
-  const walkinResultExams = useMemo(() => {
-    const source = Array.isArray(walkinResults) ? walkinResults : [];
-    return [...new Set(source.map((row) => String(row.exam_id || "")).filter(Boolean))];
   }, [walkinResults]);
   const filteredWalkinStudents = useMemo(() => {
     const query = walkinStudentsSearch.trim().toLowerCase();
@@ -2217,9 +2208,6 @@ function AdminDashboard() {
       return matchQuery && matchCourse;
     });
   }, [regularStudents, regularStudentsSearch, regularStudentsCourseFilter]);
-  const regularResultExamIds = useMemo(() => {
-    return [...new Set((recentResults || []).map((row) => String(row.exam_id || "")).filter(Boolean))];
-  }, [recentResults]);
   const filteredRegularResults = useMemo(() => {
     const query = regularResultsSearch.trim().toLowerCase();
     return (recentResults || []).filter((row) => {
@@ -2228,14 +2216,9 @@ function AdminDashboard() {
         String(row.result_id || "").toLowerCase().includes(query) ||
         String(row.student_name || row.student_id || "").toLowerCase().includes(query) ||
         String(row.exam_name || row.exam_id || "").toLowerCase().includes(query);
-      const matchExam =
-        regularResultsExamFilter === "ALL" || String(row.exam_id || "") === regularResultsExamFilter;
-      return matchQuery && matchExam;
+      return matchQuery;
     });
-  }, [recentResults, regularResultsSearch, regularResultsExamFilter]);
-  const examStatusOptions = useMemo(() => {
-    return [...new Set((exams || []).map((exam) => normalizeExamStatus(exam.exam_status)).filter(Boolean))];
-  }, [exams]);
+  }, [recentResults, regularResultsSearch]);
   const filteredExams = useMemo(() => {
     const query = examListSearch.trim().toLowerCase();
     return (exams || [])
@@ -2575,155 +2558,26 @@ function AdminDashboard() {
                 </div>
                 <button className="primary-action" type="button">Download Reports</button>
               </div>
-              <div className="dashboard-section admin-section" id="admin-analytics">
-                <h2>Analytics</h2>
-                <div className="analytics-layout">
-                  <div className="stat-grid">
-                    <div className="stat-card stat-card-neutral">
-                      <span className="stat-label">Total Students</span>
-                      <span className="stat-value">{studentCount}</span>
-                      <span className="stat-meta">Registered learners</span>
-                    </div>
-                    <div className="stat-card stat-card-regular">
-                      <span className="stat-label">Regular Exam Students</span>
-                      <span className="stat-value">{regularStudentCount}</span>
-                      <span className="stat-meta">{regularStudentsPercent.toFixed(0)}% of total students</span>
-                    </div>
-                    <div className="stat-card stat-card-walkin">
-                      <span className="stat-label">Walk-In Exam Students</span>
-                      <span className="stat-value">{walkinStudentCount}</span>
-                      <span className="stat-meta">{walkinStudentsPercent.toFixed(0)}% of total students</span>
-                    </div>
-                    <div className="stat-card stat-card-regular-result">
-                      <span className="stat-label">Regular Resulted Students</span>
-                      <span className="stat-value">{regularResultedCount}</span>
-                      <span className="stat-meta">{regularResultedPercent.toFixed(0)}% of regular students</span>
-                    </div>
-                    <div className="stat-card stat-card-walkin-result">
-                      <span className="stat-label">Walk-In Resulted Students</span>
-                      <span className="stat-value">{walkinResultedCount}</span>
-                      <span className="stat-meta">{walkinResultedPercent.toFixed(0)}% of walk-in students</span>
-                    </div>
-                  </div>
-                  <div className="chart-stack">
-                    <div className="chart-row chart-row-primary">
-                      <div className="chart-card">
-                        <div className="chart-header">
-                          <h3>Monthly Registrations</h3>
-                        </div>
-                        <div className="chart-canvas chart-canvas-compact chart-canvas-monthly">
-                          <button
-                            type="button"
-                            className="month-nav-btn month-nav-btn-inline month-nav-btn-left"
-                            aria-label="Show previous month registrations"
-                            onClick={() => setRegistrationMonthOffset((prev) => Math.min(prev + 1, 24))}
-                          >
-                            &#8249;
-                          </button>
-                          <div className="monthly-registrations-card">
-                            <div className="monthly-registrations-summary">
-                              <p className="monthly-summary-value">{Number(selectedRegistrationEntry?.total || 0)}</p>
-                              <p className="monthly-summary-label">
-                                Registrations in {selectedRegistrationEntry?.monthLabel || "--"}
-                              </p>
-                              <div className="monthly-summary-previous">
-                                <span className="monthly-summary-previous-label">Previous Month</span>
-                                <div className="monthly-summary-previous-meta">
-                                  <strong>{Number(previousRegistrationEntry?.total || 0)}</strong>
-                                  <span>{previousRegistrationEntry?.monthLabel || "--"}</span>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            className="month-nav-btn month-nav-btn-inline month-nav-btn-right"
-                            aria-label="Show next month registrations"
-                            onClick={() => setRegistrationMonthOffset((prev) => Math.max(prev - 1, 0))}
-                            disabled={registrationMonthOffset === 0}
-                          >
-                            &#8250;
-                          </button>
-                        </div>
-                      </div>
-                      <div className="chart-card">
-                        <div className="chart-header">
-                          <h3>Regular vs Walk-In</h3>
-                          <span>{studentCount} total</span>
-                        </div>
-                        <div className="chart-canvas chart-canvas-compact">
-                          <div className="simple-donut-row">
-                            <div className="simple-donut-card">
-                              <div
-                                className="simple-donut"
-                                style={{ "--donut-percent": `${regularStudentsPercent}%` }}
-                              >
-                                <div className="simple-donut-center">{regularStudentsPercent.toFixed(0)}%</div>
-                              </div>
-                              <p className="simple-donut-label">Regular ({regularStudentCount})</p>
-                            </div>
-                            <div className="simple-donut-card">
-                              <div
-                                className="simple-donut simple-donut-alt"
-                                style={{ "--donut-percent": `${walkinStudentsPercent}%` }}
-                              >
-                                <div className="simple-donut-center">{walkinStudentsPercent.toFixed(0)}%</div>
-                              </div>
-                              <p className="simple-donut-label">Walk-In ({walkinStudentCount})</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="chart-row">
-                      <div className="chart-card">
-                        <div className="chart-header">
-                          <h3>Enrollment by Section</h3>
-                          <span>{studentCount} total students</span>
-                        </div>
-                        <div className="chart-canvas chart-canvas-compact">
-                          <div className="section-enrollment-bars">
-                            {enrollmentSectionBars.map((entry) => (
-                              <div className={`section-enrollment-row tone-${entry.tone}`} key={`enroll-row-${entry.label}`}>
-                                <div className="section-enrollment-head">
-                                  <span>{entry.label}</span>
-                                  <span>{entry.count} ({entry.percent.toFixed(0)}%)</span>
-                                </div>
-                                <div className="section-enrollment-track">
-                                  <div
-                                    className="section-enrollment-fill"
-                                    style={{ width: `${entry.barPercent}%` }}
-                                  />
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="chart-card">
-                        <div className="chart-header">
-                          <h3>Registered BDEs</h3>
-                          <span>{registeredBdeCount} total</span>
-                        </div>
-                        <div className="chart-canvas chart-canvas-compact">
-                          <div className="kpi-wrap">
-                            <p className="kpi-value">{registeredBdeCount}</p>
-                            <p className="kpi-label">Total Registered BDEs</p>
-                            <div className="kpi-split">
-                              <span>Assigned: {assignedBdeCount}</span>
-                              <span>Unassigned: {unassignedBdeCount}</span>
-                            </div>
-                            <div className="kpi-split">
-                              <span>Assignment Coverage: {toPercent(assignedBdeCount, registeredBdeCount || 1).toFixed(0)}%</span>
-                              <span>Total Students: {studentCount}</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <AdminAnalyticsSection
+                studentCount={studentCount}
+                regularStudentCount={regularStudentCount}
+                regularStudentsPercent={regularStudentsPercent}
+                walkinStudentCount={walkinStudentCount}
+                walkinStudentsPercent={walkinStudentsPercent}
+                regularResultedCount={regularResultedCount}
+                regularResultedPercent={regularResultedPercent}
+                walkinResultedCount={walkinResultedCount}
+                walkinResultedPercent={walkinResultedPercent}
+                selectedRegistrationEntry={selectedRegistrationEntry}
+                previousRegistrationEntry={previousRegistrationEntry}
+                registrationMonthOffset={registrationMonthOffset}
+                setRegistrationMonthOffset={setRegistrationMonthOffset}
+                enrollmentSectionBars={enrollmentSectionBars}
+                registeredBdeCount={registeredBdeCount}
+                assignedBdeCount={assignedBdeCount}
+                unassignedBdeCount={unassignedBdeCount}
+                assignmentCoveragePercent={toPercent(assignedBdeCount, registeredBdeCount || 1)}
+              />
             </>
           )}
 
@@ -2743,7 +2597,11 @@ function AdminDashboard() {
                     </button>
                   </div>
                   {walkinRecomputeStatus && <p className="section-placeholder">{walkinRecomputeStatus}</p>}
-                  <div className="table-toolbar">
+                  <div className="table-toolbar table-toolbar-upgraded">
+                    <div className="table-toolbar-head">
+                      <span className="table-toolbar-title">Walk-In Results</span>
+                      <span className="table-toolbar-meta">{walkinResultsRows.length} records</span>
+                    </div>
                     <input
                       type="text"
                       placeholder="Search by student, exam, stream"
@@ -2761,22 +2619,11 @@ function AdminDashboard() {
                         </option>
                       ))}
                     </select>
-                    <select
-                      value={walkinResultsExamFilter}
-                      onChange={(event) => setWalkinResultsExamFilter(event.target.value)}
-                    >
-                      <option value="ALL">All Exams</option>
-                      {walkinResultExams.map((examId) => (
-                        <option key={`wr-exam-${examId}`} value={examId}>
-                          Exam {examId}
-                        </option>
-                      ))}
-                    </select>
                   </div>
                   {walkinResultsLoading && renderTableSkeleton(6)}
                   {walkinResultsError && <p className="auth-help">{walkinResultsError}</p>}
                   {walkinResults && walkinResultsRows.length === 0 && !walkinResultsLoading && !walkinResultsError && (
-                    <p className="section-placeholder">No walk-in results yet.</p>
+                    <div className="section-placeholder section-placeholder-panel">No walk-in results yet.</div>
                   )}
                   {walkinResults && walkinResultsRows.length > 0 && (
                     <div className="table-shell">
@@ -3171,19 +3018,26 @@ function AdminDashboard() {
                           className={`walkin-tab ${regularQuestionSectionTab === "technical" ? "active" : ""}`}
                           onClick={() => setRegularQuestionSectionTab("technical")}
                         >
-                          Technical Questions
+                          Tech Questions
+                        </button>
+                        <button
+                          type="button"
+                          className={`walkin-tab ${regularQuestionSectionTab === "non-technical" ? "active" : ""}`}
+                          onClick={() => setRegularQuestionSectionTab("non-technical")}
+                        >
+                          Non Tech Questions
                         </button>
                       </div>
 
-                      <div className="walkin-sheet-grid walkin-sheet-grid-single">
+                      <div className="walkin-sheet-grid walkin-sheet-grid-single regular-question-sections">
                         {regularQuestionSectionTab === "aptitude" && (
                           <div className="walkin-sheet-block">
                             <h3>Aptitude Questions</h3>
                             {regularAptitudeQuestions.length === 0 && <p>No aptitude questions defined.</p>}
-                            {regularAptitudeQuestions.map((question) => (
+                            {regularAptitudeQuestions.map((question, index) => (
                               <div className="walkin-sheet-item" key={`regular-aptitude-${question.question_id}`}>
                                 <div className="walkin-sheet-item-head">
-                                  <p className="item-meta">QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
+                                  <p className="item-meta">S.No. {index + 1} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
                                   <button
                                     type="button"
                                     className="walkin-question-edit-btn"
@@ -3200,48 +3054,49 @@ function AdminDashboard() {
                         )}
 
                         {regularQuestionSectionTab === "technical" && (
-                          <>
-                            <div className="walkin-sheet-block">
-                              <h3>TECH Background</h3>
-                              {regularTechBackgroundQuestions.length === 0 && <p>No TECH background questions defined.</p>}
-                              {regularTechBackgroundQuestions.map((question) => (
-                                <div className="walkin-sheet-item" key={`regular-technical-tech-${question.question_id}`}>
-                                  <div className="walkin-sheet-item-head">
-                                    <p className="item-meta">{question.section_name} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
-                                    <button
-                                      type="button"
-                                      className="walkin-question-edit-btn"
-                                      onClick={() => openRegularQuestionEditor("technical", question)}
-                                    >
-                                      Edit
-                                    </button>
-                                  </div>
-                                  <p className="item-text">{question.question_text}</p>
-                                  {renderRegularQuestionSheetOptions(question)}
+                          <div className="walkin-sheet-block">
+                            <h3>Tech Questions</h3>
+                            {regularTechBackgroundQuestions.length === 0 && <p>No technical questions defined.</p>}
+                            {regularTechBackgroundQuestions.map((question, index) => (
+                              <div className="walkin-sheet-item" key={`regular-technical-tech-${question.question_id}`}>
+                                <div className="walkin-sheet-item-head">
+                                  <p className="item-meta">S.No. {index + 1} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
+                                  <button
+                                    type="button"
+                                    className="walkin-question-edit-btn"
+                                    onClick={() => openRegularQuestionEditor("technical", question)}
+                                  >
+                                    Edit
+                                  </button>
                                 </div>
-                              ))}
-                            </div>
-                            <div className="walkin-sheet-block">
-                              <h3>NON_TECH Background</h3>
-                              {regularNonTechBackgroundQuestions.length === 0 && <p>No NON_TECH background questions defined.</p>}
-                              {regularNonTechBackgroundQuestions.map((question) => (
-                                <div className="walkin-sheet-item" key={`regular-technical-non-tech-${question.question_id}`}>
-                                  <div className="walkin-sheet-item-head">
-                                    <p className="item-meta">{question.section_name} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
-                                    <button
-                                      type="button"
-                                      className="walkin-question-edit-btn"
-                                      onClick={() => openRegularQuestionEditor("technical", question)}
-                                    >
-                                      Edit
-                                    </button>
-                                  </div>
-                                  <p className="item-text">{question.question_text}</p>
-                                  {renderRegularQuestionSheetOptions(question)}
+                                <p className="item-text">{question.question_text}</p>
+                                {renderRegularQuestionSheetOptions(question)}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {regularQuestionSectionTab === "non-technical" && (
+                          <div className="walkin-sheet-block">
+                            <h3>Non Tech Questions</h3>
+                            {regularNonTechBackgroundQuestions.length === 0 && <p>No non technical questions defined.</p>}
+                            {regularNonTechBackgroundQuestions.map((question, index) => (
+                              <div className="walkin-sheet-item" key={`regular-technical-non-tech-${question.question_id}`}>
+                                <div className="walkin-sheet-item-head">
+                                  <p className="item-meta">S.No. {index + 1} | QID: {question.question_id} | Type: {String(question.question_type || "MCQ")}</p>
+                                  <button
+                                    type="button"
+                                    className="walkin-question-edit-btn"
+                                    onClick={() => openRegularQuestionEditor("technical", question)}
+                                  >
+                                    Edit
+                                  </button>
                                 </div>
-                              ))}
-                            </div>
-                          </>
+                                <p className="item-text">{question.question_text}</p>
+                                {renderRegularQuestionSheetOptions(question)}
+                              </div>
+                            ))}
+                          </div>
                         )}
                       </div>
                     </>
@@ -3252,24 +3107,17 @@ function AdminDashboard() {
               {activeSection === "regular-results" && (
                 <div className="dashboard-section admin-section" id="admin-results">
                   <h2>Regular Student Results</h2>
-                  <div className="table-toolbar">
+                  <div className="table-toolbar table-toolbar-upgraded">
+                    <div className="table-toolbar-head">
+                      <span className="table-toolbar-title">Regular Results</span>
+                      <span className="table-toolbar-meta">{filteredRegularResults.length} matches</span>
+                    </div>
                     <input
                       type="text"
                       placeholder="Search by result, student, exam"
                       value={regularResultsSearch}
                       onChange={(event) => setRegularResultsSearch(event.target.value)}
                     />
-                    <select
-                      value={regularResultsExamFilter}
-                      onChange={(event) => setRegularResultsExamFilter(event.target.value)}
-                    >
-                      <option value="ALL">All Exams</option>
-                      {regularResultExamIds.map((examId) => (
-                        <option key={`rr-exam-${examId}`} value={examId}>
-                          Exam {examId}
-                        </option>
-                      ))}
-                    </select>
                   </div>
                   <div className="table-shell">
                   <table className="sticky-table">
@@ -3288,7 +3136,7 @@ function AdminDashboard() {
                     <tbody>
                       {filteredRegularResults.length === 0 && (
                         <tr>
-                          <td colSpan="8" style={{ textAlign: "center" }}>No results found</td>
+                          <td colSpan="8" className="table-empty-cell">No results found</td>
                         </tr>
                       )}
                       {filteredRegularResults.map((result) => {
@@ -3414,9 +3262,29 @@ function AdminDashboard() {
                 </div>
                 )}
 
-                <div className="dashboard-section admin-section" id="walkin-create">
-                  <h2>Create Walk-In Student Account</h2>
-                  <form className="form-row form-row-wide" autoComplete="off" onSubmit={handleWalkinCreation}>
+                <div
+                  className={`dashboard-section admin-section create-panel ${walkinCreateOpen ? "is-open" : "is-collapsed"}`}
+                  id="walkin-create"
+                >
+                  <div className="create-panel-header">
+                    <h2>Create Walk-In Student Account</h2>
+                    <button
+                      type="button"
+                      className="small-outline-btn create-panel-toggle"
+                      onClick={() => setWalkinCreateOpen((prev) => !prev)}
+                      aria-expanded={walkinCreateOpen}
+                      aria-controls="walkin-create-form"
+                    >
+                      {walkinCreateOpen ? "Close" : "Create"}
+                    </button>
+                  </div>
+                  {walkinCreateOpen && (
+                  <form
+                    id="walkin-create-form"
+                    className="form-row form-row-wide"
+                    autoComplete="off"
+                    onSubmit={handleWalkinCreation}
+                  >
                     <div className="form-field">
                       <label>Full Name</label>
                       <input
@@ -3518,6 +3386,7 @@ function AdminDashboard() {
                       {walkinCreateSubmitting ? "Creating..." : "Create Walk-In Account"}
                     </button>
                   </form>
+                  )}
                   {collegeError && (
                     <p className="auth-help" style={{ marginTop: 10 }}>
                       {collegeError}
@@ -3558,7 +3427,11 @@ function AdminDashboard() {
                   </div>
                   {!selectedWalkinProfile && (
                     <>
-                      <div className="table-toolbar">
+                      <div className="table-toolbar table-toolbar-upgraded">
+                        <div className="table-toolbar-head">
+                          <span className="table-toolbar-title">Walk-In Students</span>
+                          <span className="table-toolbar-meta">{filteredWalkinStudents.length} matches</span>
+                        </div>
                         <input
                           type="text"
                           placeholder="Search by id, name, email"
@@ -3592,7 +3465,7 @@ function AdminDashboard() {
                         <tbody>
                           {filteredWalkinStudents.length === 0 && (
                             <tr>
-                              <td colSpan="6" style={{ textAlign: "center" }}>No walk-in students found</td>
+                              <td colSpan="6" className="table-empty-cell">No walk-in students found</td>
                             </tr>
                           )}
                           {filteredWalkinStudents.map((student, index) => {
@@ -3861,9 +3734,29 @@ function AdminDashboard() {
 
               {activeSection === "regular" && (
               <>
-                <div className="dashboard-section admin-section" id="regular-create">
-                  <h2>Create Regular Student Account</h2>
-                  <form className="form-row form-row-wide" autoComplete="off" onSubmit={handleRegularCreation}>
+                <div
+                  className={`dashboard-section admin-section create-panel ${regularCreateOpen ? "is-open" : "is-collapsed"}`}
+                  id="regular-create"
+                >
+                  <div className="create-panel-header">
+                    <h2>Create Regular Student Account</h2>
+                    <button
+                      type="button"
+                      className="small-outline-btn create-panel-toggle"
+                      onClick={() => setRegularCreateOpen((prev) => !prev)}
+                      aria-expanded={regularCreateOpen}
+                      aria-controls="regular-create-form"
+                    >
+                      {regularCreateOpen ? "Close" : "Create"}
+                    </button>
+                  </div>
+                  {regularCreateOpen && (
+                  <form
+                    id="regular-create-form"
+                    className="form-row form-row-wide"
+                    autoComplete="off"
+                    onSubmit={handleRegularCreation}
+                  >
                     <div className="form-field">
                       <label>Full Name</label>
                       <input
@@ -3974,6 +3867,7 @@ function AdminDashboard() {
                       {regularCreateSubmitting ? "Creating..." : "Create Regular Account"}
                     </button>
                   </form>
+                  )}
                   {regularStatus && (
                     <p className="auth-help" style={{ marginTop: 10 }}>
                       {regularStatus}
@@ -4002,7 +3896,11 @@ function AdminDashboard() {
                   </div>
                   {!selectedRegularProfile && (
                     <>
-                  <div className="table-toolbar">
+                  <div className="table-toolbar table-toolbar-upgraded">
+                    <div className="table-toolbar-head">
+                      <span className="table-toolbar-title">Regular Students</span>
+                      <span className="table-toolbar-meta">{filteredRegularStudents.length} matches</span>
+                    </div>
                     <input
                       type="text"
                       placeholder="Search by id, name, email"
@@ -4037,7 +3935,7 @@ function AdminDashboard() {
                     <tbody>
                       {filteredRegularStudents.length === 0 && (
                         <tr>
-                          <td colSpan="7" style={{ textAlign: "center" }}>No regular students found</td>
+                          <td colSpan="7" className="table-empty-cell">No regular students found</td>
                         </tr>
                       )}
                       {filteredRegularStudents.map((student, index) => {
@@ -4100,7 +3998,11 @@ function AdminDashboard() {
                 <h2>Student Profiles</h2>
                 {!selectedWalkinProfile && (
                   <>
-                <div className="table-toolbar">
+                <div className="table-toolbar table-toolbar-upgraded">
+                  <div className="table-toolbar-head">
+                    <span className="table-toolbar-title">Student Profiles</span>
+                    <span className="table-toolbar-meta">{filteredStudentProfiles.length} matches</span>
+                  </div>
                   <input
                     type="text"
                     placeholder="Search by id, name, email"
@@ -4143,7 +4045,7 @@ function AdminDashboard() {
                   <tbody>
                     {filteredStudentProfiles.length === 0 && (
                       <tr>
-                        <td colSpan="7" style={{ textAlign: "center" }}>No students found</td>
+                        <td colSpan="7" className="table-empty-cell">No students found</td>
                       </tr>
                     )}
                     {filteredStudentProfiles.map((student, index) => (
@@ -4617,7 +4519,11 @@ function AdminDashboard() {
 
                 <div className="dashboard-section admin-section" id="admin-business-executives-list">
                   <h2>BDE Accounts</h2>
-                  <div className="table-toolbar">
+                  <div className="table-toolbar table-toolbar-upgraded">
+                    <div className="table-toolbar-head">
+                      <span className="table-toolbar-title">BDE Accounts</span>
+                      <span className="table-toolbar-meta">{filteredBdeSummaryRows.length} matches</span>
+                    </div>
                     <input
                       type="text"
                       placeholder="Search by BDE name, email, phone"
@@ -4639,7 +4545,7 @@ function AdminDashboard() {
                       <tbody>
                         {filteredBdeSummaryRows.length === 0 && (
                           <tr>
-                            <td colSpan="5" style={{ textAlign: "center" }}>No BDE accounts found</td>
+                            <td colSpan="5" className="table-empty-cell">No BDE accounts found</td>
                           </tr>
                         )}
                         {filteredBdeSummaryRows.map((row) => (
@@ -4677,7 +4583,11 @@ function AdminDashboard() {
 
                 <div className="dashboard-section admin-section" id="admin-business-executives-students">
                   <h2>BDE Students List</h2>
-                  <div className="table-toolbar">
+                  <div className="table-toolbar table-toolbar-upgraded">
+                    <div className="table-toolbar-head">
+                      <span className="table-toolbar-title">BDE Mapping</span>
+                      <span className="table-toolbar-meta">{filteredBdeStudentRows.length} matches</span>
+                    </div>
                     <input
                       type="text"
                       placeholder="Search by id, name, email"
@@ -4730,7 +4640,7 @@ function AdminDashboard() {
                       <tbody>
                         {filteredBdeStudentRows.length === 0 && (
                           <tr>
-                            <td colSpan="6" style={{ textAlign: "center" }}>No students mapped to BDE yet</td>
+                            <td colSpan="6" className="table-empty-cell">No students mapped to BDE yet</td>
                           </tr>
                         )}
                         {filteredBdeStudentRows.map((row) => (
@@ -4809,7 +4719,11 @@ function AdminDashboard() {
                 <div className="form-table-divider" aria-hidden="true" />
                 <div style={{ marginTop: 24 }}>
                   <h3>Scheduled Regular Exams</h3>
-                  <div className="table-toolbar">
+                  <div className="table-toolbar table-toolbar-upgraded">
+                    <div className="table-toolbar-head">
+                      <span className="table-toolbar-title">Exams</span>
+                      <span className="table-toolbar-meta">{filteredExams.length} matches</span>
+                    </div>
                     <input
                       type="text"
                       placeholder="Search by exam id"
@@ -4831,7 +4745,7 @@ function AdminDashboard() {
                     <tbody>
                       {filteredExams.length === 0 && (
                         <tr>
-                          <td colSpan="5" style={{ textAlign: "center" }}>No exams found</td>
+                          <td colSpan="5" className="table-empty-cell">No exams found</td>
                         </tr>
                       )}
                       {filteredExams.map((exam) => (

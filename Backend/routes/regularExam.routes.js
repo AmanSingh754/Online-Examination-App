@@ -320,6 +320,31 @@ const loadRegularSavedAnswers = async ({ studentId, examId, questionSetId, txQue
     );
 };
 
+const fetchRegularAllowedQuestionIds = async ({
+    examId,
+    questionSetId,
+    allowedTechnicalSection,
+    txQuery = queryAsync
+}) => {
+    if (!examId || !questionSetId) return new Set();
+    const rows = await txQuery(
+        `SELECT question_id
+         FROM regular_exam_questions
+         WHERE exam_id = ?
+           AND question_set_id = ?
+           AND (
+               UPPER(COALESCE(section_name, '')) = 'APTITUDE'
+               OR UPPER(COALESCE(section_name, '')) = UPPER(COALESCE(?, ''))
+           )`,
+        [examId, questionSetId, allowedTechnicalSection || null]
+    );
+    return new Set(
+        (rows || [])
+            .map((row) => Number(row?.question_id || 0))
+            .filter((questionId) => questionId > 0)
+    );
+};
+
 const mergeRegularSubmittedAnswers = ({ payloadAnswers = [], savedRows = [] }) => {
     const merged = new Map();
 
@@ -562,8 +587,7 @@ router.get("/questions/:examId", async (req, res) => {
                AND q.question_set_id = ?
                AND (
                    UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
-                   OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, q.section_name))
-                   OR UPPER(COALESCE(q.section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
+                   OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, ''))
                )
              ORDER BY
                  CASE
@@ -629,7 +653,7 @@ router.post("/draft/autosave", async (req, res) => {
         }
 
         const studentRows = await queryAsync(
-            `SELECT status, college_id
+            `SELECT status, college_id, background_type
              FROM students
              WHERE student_id = ?
              LIMIT 1`,
@@ -643,6 +667,12 @@ router.post("/draft/autosave", async (req, res) => {
 
         const attempt = await ensureRegularStudentQuestionSet({ studentId, examId });
         const questionSetId = Number(attempt.questionSetId || 0);
+        const allowedTechnicalSection = getRegularTechnicalSection(regularStudent.background_type);
+        const allowedQuestionIds = await fetchRegularAllowedQuestionIds({
+            examId,
+            questionSetId,
+            allowedTechnicalSection
+        });
         const payloadAnswers = Array.isArray(req.body?.answers) ? req.body.answers : [];
         const validAnswers = payloadAnswers
             .filter((answer) => String(answer?.question_type || "MCQ").trim().toUpperCase() === "MCQ")
@@ -650,7 +680,11 @@ router.post("/draft/autosave", async (req, res) => {
                 question_id: Number(answer?.question_id || 0),
                 selected_option: String(answer?.selected_option || "").trim().toUpperCase()
             }))
-            .filter((answer) => answer.question_id > 0 && ["A", "B", "C", "D"].includes(answer.selected_option));
+            .filter((answer) =>
+                answer.question_id > 0 &&
+                allowedQuestionIds.has(answer.question_id) &&
+                ["A", "B", "C", "D"].includes(answer.selected_option)
+            );
 
         await db.withTransaction(async (txQuery) => {
             await txQuery(
@@ -717,7 +751,7 @@ router.post("/submit", async (req, res) => {
         }
 
         const regularStudentRows = await queryAsync(
-            `SELECT status, college_id
+            `SELECT status, college_id, background_type
              FROM students
              WHERE student_id = ?
              LIMIT 1`,
@@ -763,6 +797,7 @@ router.post("/submit", async (req, res) => {
         }
 
         regularQuestionSetId = Number(existingAttempt?.question_set_id || regularQuestionSetId || 0) || null;
+        const allowedTechnicalSection = getRegularTechnicalSection(regularStudent.background_type);
         if (regularTiming.instructionWindowActive) {
             return res.status(400).json({ success: false, message: "Question paper is not unlocked yet." });
         }
@@ -779,8 +814,16 @@ router.post("/submit", async (req, res) => {
             payloadAnswers: submittedAnswers,
             savedRows
         });
+        const allowedQuestionIds = await fetchRegularAllowedQuestionIds({
+            examId: examIdNum,
+            questionSetId: regularQuestionSetId,
+            allowedTechnicalSection
+        });
+        const validatedAnswers = effectiveAnswers.filter((answer) =>
+            allowedQuestionIds.has(Number(answer?.question_id || 0))
+        );
 
-        if (!effectiveAnswers.length) {
+        if (!validatedAnswers.length) {
             return res.status(400).json({ success: false, message: "No answers available to submit." });
         }
 
@@ -793,7 +836,7 @@ router.post("/submit", async (req, res) => {
                 [studentId, examIdNum, regularQuestionSetId]
             );
 
-            for (const answer of effectiveAnswers) {
+            for (const answer of validatedAnswers) {
                 const questionType = String(answer?.question_type || "MCQ").toUpperCase();
                 if (questionType !== "MCQ") continue;
                 await txQuery(
@@ -960,8 +1003,7 @@ router.post("/result", async (req, res) => {
                AND question_set_id = ?
                AND (
                    UPPER(COALESCE(section_name, '')) = 'APTITUDE'
-                   OR UPPER(COALESCE(section_name, '')) = UPPER(COALESCE(?, section_name))
-                   OR UPPER(COALESCE(section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
+                   OR UPPER(COALESCE(section_name, '')) = UPPER(COALESCE(?, ''))
                )`,
             [examId, questionSetId, allowedTechnicalSection || null]
         );
@@ -982,8 +1024,7 @@ router.post("/result", async (req, res) => {
                AND COALESCE(sa.question_set_id, ?) = ?
                AND (
                    UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
-                   OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, q.section_name))
-                   OR UPPER(COALESCE(q.section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
+                   OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, ''))
                )`,
             [questionSetId, studentId, examId, questionSetId, questionSetId, allowedTechnicalSection || null]
         );

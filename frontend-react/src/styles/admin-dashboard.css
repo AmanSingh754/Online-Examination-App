@@ -333,6 +333,43 @@
     min-height: 310px;
 }
 
+.admin-dashboard #walkin-create.create-panel.is-collapsed,
+.admin-dashboard #regular-create.create-panel.is-collapsed {
+    min-height: auto;
+    padding-bottom: 32px;
+}
+
+.admin-dashboard #walkin-create.create-panel.is-open,
+.admin-dashboard #regular-create.create-panel.is-open {
+    min-height: 310px;
+}
+
+.admin-dashboard #walkin-create.create-panel,
+.admin-dashboard #regular-create.create-panel {
+    border-color: rgba(214, 227, 255, 0.3);
+    box-shadow:
+        0 26px 52px rgba(12, 14, 26, 0.42),
+        0 0 0 1px rgba(160, 186, 255, 0.08),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+}
+
+.admin-dashboard #walkin-create.create-panel::before,
+.admin-dashboard #regular-create.create-panel::before {
+    background: linear-gradient(90deg, rgba(242, 208, 126, 0.62), rgba(160, 186, 255, 0.6), transparent 88%);
+}
+
+.admin-dashboard #walkin-create.create-panel:hover,
+.admin-dashboard #regular-create.create-panel:hover,
+.admin-dashboard #walkin-create.create-panel.is-collapsed,
+.admin-dashboard #regular-create.create-panel.is-collapsed {
+    border-color: rgba(196, 214, 255, 0.42);
+    box-shadow:
+        0 30px 58px rgba(12, 14, 26, 0.45),
+        0 0 0 1px rgba(242, 208, 126, 0.12),
+        0 0 36px rgba(113, 119, 242, 0.12),
+        inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
 .admin-dashboard #walkin-list,
 .admin-dashboard #regular-list {
     padding: 40px 42px;
@@ -371,6 +408,39 @@
     font-size: 1.06rem;
     border-radius: 14px;
     padding: 0 18px;
+}
+
+.admin-dashboard .create-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.admin-dashboard .create-panel-header h2 {
+    margin: 0;
+}
+
+.admin-dashboard .create-panel-toggle {
+    flex-shrink: 0;
+    min-height: 46px;
+    min-width: 116px;
+    padding: 10px 24px;
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 16px;
+}
+
+@media (max-width: 760px) {
+    .admin-dashboard .create-panel-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .admin-dashboard .create-panel-toggle {
+        width: 100%;
+        justify-content: center;
+    }
 }
 
 .admin-dashboard #walkin-list .table-toolbar,
@@ -552,6 +622,7 @@
     align-items: start;
 }
 
+
 .admin-dashboard .chart-stack {
     display: grid;
     gap: 20px;
@@ -588,6 +659,7 @@
         inset 0 0 0 1px rgba(255, 255, 255, 0.04),
         0 20px 36px rgba(12, 14, 26, 0.42);
 }
+
 
 .admin-dashboard .topbar-notification {
     position: relative;
@@ -1151,6 +1223,7 @@
     padding: 8px 12px;
 }
 
+
 .admin-dashboard .kpi-value {
     margin: 0;
     font-size: 42px;
@@ -1297,6 +1370,7 @@
     color: rgba(248, 250, 252, 0.82);
     font-weight: 700;
 }
+
 
 .admin-dashboard .monthly-summary-split {
     display: flex;
@@ -1774,6 +1848,38 @@
     margin: 8px 0 14px;
 }
 
+.admin-dashboard .table-toolbar.table-toolbar-upgraded {
+    align-items: center;
+    padding: 14px 16px;
+    border-radius: 14px;
+    border: 1px solid rgba(120, 126, 153, 0.22);
+    background: linear-gradient(135deg, rgba(16, 20, 33, 0.88), rgba(25, 31, 49, 0.8));
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
+}
+
+.admin-dashboard .table-toolbar-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 180px;
+    margin-right: 4px;
+}
+
+.admin-dashboard .table-toolbar-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(248, 250, 252, 0.76);
+}
+
+.admin-dashboard .table-toolbar-meta {
+    font-size: 12px;
+    color: rgba(242, 208, 126, 0.88);
+    white-space: nowrap;
+}
+
 .admin-dashboard .table-toolbar input,
 .admin-dashboard .table-toolbar select {
     min-height: 40px;
@@ -1794,6 +1900,22 @@
     border-radius: 14px;
     border: 1px solid rgba(120, 126, 153, 0.22);
     background: rgba(12, 16, 30, 0.35);
+}
+
+.admin-dashboard .table-empty-cell {
+    text-align: center;
+    color: rgba(226, 232, 240, 0.72);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 22px 16px;
+}
+
+.admin-dashboard .section-placeholder.section-placeholder-panel {
+    margin: 14px 0;
+    padding: 18px 20px;
+    border-radius: 14px;
+    border: 1px dashed rgba(120, 126, 153, 0.3);
+    background: rgba(15, 23, 42, 0.28);
 }
 
 .admin-dashboard .table-shell::-webkit-scrollbar {
@@ -2602,6 +2724,147 @@
     justify-content: space-between;
     gap: 12px;
     flex-wrap: wrap;
+    margin-bottom: 18px;
+}
+
+.admin-dashboard #walkin-results .table-toolbar.table-toolbar-upgraded {
+    display: grid;
+    grid-template-columns: max-content minmax(280px, 1fr) 220px;
+    align-items: center;
+    gap: 12px;
+    margin-top: 6px;
+    padding-top: 18px;
+    padding-bottom: 18px;
+}
+
+.admin-dashboard #walkin-results .table-toolbar-head {
+    min-width: 0;
+    margin-right: 0;
+}
+
+.admin-dashboard #walkin-results .table-toolbar input {
+    width: 100%;
+    min-width: 0;
+}
+
+.admin-dashboard #walkin-results .table-toolbar select {
+    width: 100%;
+    min-width: 0;
+}
+
+.admin-dashboard #walkin-results .table-shell table {
+    min-width: 1180px;
+}
+
+.admin-dashboard #walkin-results .sticky-table th:nth-child(1),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(1) {
+    min-width: 110px;
+}
+
+.admin-dashboard #walkin-results .sticky-table th:nth-child(2),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(2) {
+    min-width: 220px;
+}
+
+.admin-dashboard #walkin-results .sticky-table th:nth-child(3),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(3) {
+    min-width: 140px;
+}
+
+.admin-dashboard #walkin-results .sticky-table th:nth-child(4),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(4) {
+    min-width: 100px;
+}
+
+.admin-dashboard #walkin-results .sticky-table th:nth-child(5),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(5),
+.admin-dashboard #walkin-results .sticky-table th:nth-child(6),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(6),
+.admin-dashboard #walkin-results .sticky-table th:nth-child(7),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(7),
+.admin-dashboard #walkin-results .sticky-table th:nth-child(8),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(8) {
+    min-width: 110px;
+}
+
+.admin-dashboard #walkin-results .sticky-table th:nth-child(9),
+.admin-dashboard #walkin-results .sticky-table td:nth-child(9) {
+    min-width: 120px;
+}
+
+.admin-dashboard #admin-results .table-toolbar.table-toolbar-upgraded {
+    grid-template-columns: minmax(170px, auto) minmax(260px, 360px);
+    align-items: center;
+    gap: 14px;
+}
+
+.admin-dashboard #admin-results .table-shell table {
+    min-width: 940px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(1),
+.admin-dashboard #admin-results .sticky-table td:nth-child(1) {
+    min-width: 90px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(2),
+.admin-dashboard #admin-results .sticky-table td:nth-child(2) {
+    min-width: 180px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(3),
+.admin-dashboard #admin-results .sticky-table td:nth-child(3) {
+    min-width: 180px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(4),
+.admin-dashboard #admin-results .sticky-table td:nth-child(4) {
+    min-width: 120px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(5),
+.admin-dashboard #admin-results .sticky-table td:nth-child(5) {
+    min-width: 92px;
+    width: 92px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(6),
+.admin-dashboard #admin-results .sticky-table td:nth-child(6) {
+    min-width: 116px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(7),
+.admin-dashboard #admin-results .sticky-table td:nth-child(7) {
+    min-width: 130px;
+}
+
+.admin-dashboard #admin-results .sticky-table th:nth-child(8),
+.admin-dashboard #admin-results .sticky-table td:nth-child(8) {
+    min-width: 96px;
+    width: 96px;
+    text-align: center;
+}
+
+.admin-dashboard #admin-results .sticky-table td:last-child {
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+.admin-dashboard #admin-results .ghost-action {
+    padding: 5px 12px;
+    min-width: 64px;
+    font-size: 0.86rem;
+    white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+    .admin-dashboard #walkin-results .table-toolbar.table-toolbar-upgraded {
+        grid-template-columns: 1fr;
+    }
+
+    .admin-dashboard #admin-results .table-toolbar.table-toolbar-upgraded {
+        grid-template-columns: 1fr;
+    }
 }
 
 .walkin-review-head h3 {
@@ -2707,6 +2970,40 @@
     flex-wrap: wrap;
     gap: 10px;
     margin: 8px 0 16px;
+}
+
+.admin-dashboard :is(#walkin-questions, #regular-questions) .walkin-sheet-section-tabs .walkin-tab {
+    appearance: none;
+    border: 1px solid rgba(242, 208, 126, 0.42);
+    background: linear-gradient(145deg, rgba(19, 27, 49, 0.96), rgba(28, 38, 66, 0.92));
+    color: rgba(236, 241, 255, 0.92);
+    border-radius: 999px;
+    padding: 0.62rem 1.15rem;
+    min-height: 44px;
+    font-size: 0.84rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+        0 10px 22px rgba(6, 12, 28, 0.22);
+}
+
+.admin-dashboard :is(#walkin-questions, #regular-questions) .walkin-sheet-section-tabs .walkin-tab:hover {
+    transform: translateY(-1px);
+    border-color: rgba(248, 226, 165, 0.7);
+    box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.05),
+        0 14px 26px rgba(242, 208, 126, 0.18);
+}
+
+.admin-dashboard :is(#walkin-questions, #regular-questions) .walkin-sheet-section-tabs .walkin-tab.active {
+    background: linear-gradient(135deg, #f2d07e, #f8e2a5);
+    color: #1b1f33;
+    border-color: rgba(248, 226, 165, 0.88);
+    box-shadow:
+        0 14px 28px rgba(242, 208, 126, 0.28),
+        0 0 0 1px rgba(255, 248, 220, 0.18);
 }
 
 .admin-dashboard :is(#walkin-questions, #regular-questions) .walkin-sheet-grid.walkin-sheet-grid-single {

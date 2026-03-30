@@ -94,6 +94,9 @@ const getSectionInstruction = (sectionName) => {
     message: `You are about to begin the ${sectionName} section. Stay focused and keep your responses clear.`
   };
 };
+const getSectionDisplayName = (sectionName) => getSectionInstruction(sectionName).title;
+const isTechnicalSection = (sectionName) =>
+  String(sectionName || "").trim().toLowerCase().includes("technical");
 
 const enterFullscreen = () => {
   const docEl = document.documentElement;
@@ -238,7 +241,6 @@ export default function Exam() {
   const fullscreenViolationActiveRef = useRef(false);
   const securityNoticeTimeoutRef = useRef(null);
   const isRegularInstructionPhase = !isWalkinExamSession && Boolean(regularTiming?.instructionWindowActive);
-  const isRegularQuestionPhase = !isWalkinExamSession && Boolean(regularTiming?.questionsVisible) && !regularTiming?.submissionClosed;
   const headerTimerLabel = isRegularInstructionPhase ? "Questions unlock in" : "Time left";
   const headerTimerSeconds = isRegularInstructionPhase
     ? Number(regularTiming?.unlockInSeconds || 0)
@@ -376,24 +378,38 @@ export default function Exam() {
     };
   }, [questionBank]);
   const examOverview = useMemo(() => {
-    const sectionNames = ["Aptitude", "Technical Section", "Coding"];
-    const breakdown = [
-      {
-        key: "aptitude",
-        label: "Aptitude",
-        description: "Logical reasoning, verbal ability, and numerical problem solving."
-      },
-      {
-        key: "technical",
-        label: "Technical Section",
-        description: "Core technical MCQ and descriptive questions."
-      },
-      {
-        key: "coding",
-        label: "Coding",
-        description: "Programming questions with test-case based evaluation."
-      }
-    ].map((item) => {
+    const sectionTemplates = isWalkinExamSession
+      ? [
+          {
+            key: "aptitude",
+            label: "Aptitude",
+            description: "Logical reasoning, verbal ability, and numerical problem solving."
+          },
+          {
+            key: "technical",
+            label: "Technical Section",
+            description: "Core technical MCQ and descriptive questions."
+          },
+          {
+            key: "coding",
+            label: "Coding",
+            description: "Programming questions with test-case based evaluation."
+          }
+        ]
+      : [
+          {
+            key: "aptitude",
+            label: "Aptitude",
+            description: "Logical reasoning, verbal ability, and numerical problem solving."
+          },
+          {
+            key: "technical",
+            label: "Technical Section",
+            description: "Core technical questions."
+          }
+        ];
+
+    const breakdown = sectionTemplates.map((item) => {
       const count = (questionBank || []).filter((question) => {
         const section = String(question?.section_name || "").toLowerCase();
         if (item.key === "aptitude") return section.includes("aptitude");
@@ -403,6 +419,7 @@ export default function Exam() {
       }).length;
       return { ...item, count };
     });
+    const sectionNames = breakdown.map((item) => item.label);
 
     return {
       totalQuestions: questionBank.length || 0,
@@ -850,6 +867,10 @@ export default function Exam() {
   }, [isFullscreen, preExamOpen, submitSuccess, isSubmitting]);
 
   useEffect(() => {
+    if (!isWalkinExamSession) {
+      setWalkinCodingEntries([]);
+      return undefined;
+    }
     fetch("/exam/walkin-coding-testcases", { credentials: "include" })
       .then((res) => res.json())
       .then((data) => {
@@ -860,9 +881,13 @@ export default function Exam() {
       .catch((err) => {
         console.error("Walkin testcases load error:", err);
       });
-  }, []);
+  }, [isWalkinExamSession]);
 
   useEffect(() => {
+    if (!isWalkinExamSession) {
+      setTechnicalStreams([]);
+      return undefined;
+    }
     fetch("/exam/walkin-streams", { credentials: "include" })
       .then((res) => res.json())
       .then((data) => {
@@ -878,7 +903,7 @@ export default function Exam() {
       .catch((err) => {
         console.error("Walkin streams load error:", err);
       });
-  }, []);
+  }, [isWalkinExamSession]);
 
   useEffect(() => {
     if (!questionBank.length) return;
@@ -891,7 +916,7 @@ export default function Exam() {
   }, [questionBank]);
 
   useEffect(() => {
-    if (currentSection !== "Technical" || !currentQuestion) {
+    if (!isTechnicalSection(currentSection) || !currentQuestion) {
       setCurrentTechnicalStream("");
       return;
     }
@@ -1838,7 +1863,7 @@ export default function Exam() {
             <h2 id="section-instruction-title">{sectionInstruction.title}</h2>
             <p id="section-instruction-body">{sectionInstruction.message}</p>
             <button type="button" onClick={handleSectionOverlayClose}>
-              Continue to {pendingSection || "next"} section
+              Continue to {pendingSection ? getSectionDisplayName(pendingSection) : "next"} section
             </button>
           </div>
         </div>
@@ -1858,7 +1883,7 @@ export default function Exam() {
               you want to submit?
             </p>
             <p className="submit-warning">
-              Please double-check all sections. After submission youâ€™ll see a
+              Please double-check all sections. After submission you'll see a
               confirmation message and be asked to wait for the results.
             </p>
             <div className="submit-confirm-actions">
@@ -2084,7 +2109,7 @@ export default function Exam() {
             <div className="question-card surface">
               {!loading && currentQuestion && (
                 <>
-                  {currentSection === "Technical" && currentTechnicalStream && (
+                  {isTechnicalSection(currentSection) && currentTechnicalStream && (
                     <div className="technical-subsection-banner">
                       <div className="technical-subsection-pill">
                         <span>Stream</span>
