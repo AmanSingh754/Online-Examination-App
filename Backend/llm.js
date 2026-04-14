@@ -462,7 +462,15 @@ function normalizeSummaryText(text) {
     return cleaned.trim();
 }
 
-const INTERNAL_SKILL_TOPICS = [
+function isAgenticAiStream(streamName = "") {
+    const normalized = String(streamName || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+    return normalized === "AAI" || normalized === "AGENTICAI";
+}
+
+const DEFAULT_INTERNAL_SKILL_TOPICS = [
     {
         name: "SQL",
         patterns: [/\bsql\b/i, /\bjoin\b/i, /\bgroup\s+by\b/i, /\bwhere\b/i, /\bindex(?:es)?\b/i, /\bprimary\s+key\b/i, /\bforeign\s+key\b/i, /\bnormali[sz]ation\b/i]
@@ -501,11 +509,74 @@ const INTERNAL_SKILL_TOPICS = [
     }
 ];
 
-function detectInternalSkillTopic(questionText, referenceAnswer) {
+const AGENTIC_AI_INTERNAL_SKILL_TOPICS = [
+    {
+        name: "Agent vs LLM Apps",
+        patterns: [/\bactual\s+agent\b/i, /\bbasic\s+llm\s+app\b/i, /\bgoal[-\s]?driven\b/i, /\bautonomous\b/i, /\breactive\b/i]
+    },
+    {
+        name: "Agentic AI Fundamentals",
+        patterns: [/\bagentic\s+ai\b/i, /\bobserve\b/i, /\bplan\b/i, /\bact\b/i, /\bmemory\b/i, /\btools?\b/i]
+    },
+    {
+        name: "MCP",
+        patterns: [/\bmcp\b/i, /\bmodel\s+context\s+protocol\b/i]
+    },
+    {
+        name: "LangChain",
+        patterns: [/\blangchain\b/i, /\bllm\s+pipeline(?:s)?\b/i]
+    },
+    {
+        name: "LangGraph",
+        patterns: [/\blanggraph\b/i, /\bgraph\b/i, /\bstateful\b/i, /\bworkflow(?:s)?\b/i]
+    },
+    {
+        name: "Tool Calling",
+        patterns: [/\btool\s+calling\b/i, /\bexternal\s+function\b/i, /\bexternal\s+api\b/i, /\btools?\s+extend\b/i]
+    },
+    {
+        name: "RAG",
+        patterns: [/\brag\b/i, /\bretrieval[-\s]?augmented\s+generation\b/i, /\bretrieve\b/i, /\bground(?:ing)?\b/i]
+    },
+    {
+        name: "Vector Databases",
+        patterns: [/\bvector\s+database\b/i, /\bembeddings?\b/i, /\bsimilarity\s+search\b/i, /\bfaiss\b/i]
+    },
+    {
+        name: "Workflow Orchestration",
+        patterns: [/\bworkflow\s+orchestration\b/i, /\bdependencies\b/i, /\bcorrect\s+order\b/i, /\bcoordinate\b/i]
+    },
+    {
+        name: "Feedback Loops",
+        patterns: [/\bfeedback\s+loops?\b/i, /\badaptive\b/i, /\bimprove\s+over\s+time\b/i, /\badjust(?:s)?\s+its\s+plan\b/i]
+    },
+    {
+        name: "Accuracy and Validation",
+        patterns: [/\baccuracy\b/i, /\bvalidation\s+checks?\b/i, /\breliable\s+tools?\b/i, /\bprompts?\b/i]
+    },
+    {
+        name: "Agentic AI Challenges",
+        patterns: [/\bhallucination\b/i, /\bsecurity\s+risks?\b/i, /\bcomputational\s+cost\b/i, /\bautonomous\s+behavior\b/i]
+    }
+];
+
+function getInternalSkillTopicsForStream(streamName = "") {
+    const normalized = String(streamName || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+    if (normalized === "AAI" || normalized === "AGENTICAI") {
+        return AGENTIC_AI_INTERNAL_SKILL_TOPICS;
+    }
+    return DEFAULT_INTERNAL_SKILL_TOPICS;
+}
+
+function detectInternalSkillTopic(questionText, referenceAnswer, streamName = "") {
     const haystack = `${String(questionText || "")} ${String(referenceAnswer || "")}`;
+    const topics = getInternalSkillTopicsForStream(streamName);
     let bestName = "";
     let bestScore = 0;
-    for (const topic of INTERNAL_SKILL_TOPICS) {
+    for (const topic of topics) {
         let score = 0;
         for (const pattern of topic.patterns) {
             if (pattern.test(haystack)) score += 1;
@@ -518,13 +589,13 @@ function detectInternalSkillTopic(questionText, referenceAnswer) {
     return bestScore > 0 ? bestName : "";
 }
 
-function buildDescriptiveSkillAnalytics(rows = []) {
+function buildDescriptiveSkillAnalytics(rows = [], student = null) {
     const buckets = {};
     for (const row of rows || []) {
         const qType = String(row.question_type || "").toLowerCase();
         if (!qType.includes("descriptive")) continue;
 
-        const topic = detectInternalSkillTopic(row.question_text, row.reference_answer);
+        const topic = detectInternalSkillTopic(row.question_text, row.reference_answer, student?.course || "");
         if (!topic) continue;
 
         if (!buckets[topic]) {
@@ -658,6 +729,14 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
             .replace(/^(styled suggestions \+ final review|overall advisor note)\s*:\s*/i, "")
             .replace(/^(coding submission review)\s*:\s*/i, "")
             .trim();
+    const hasCrossStreamSkillLeak = (value = "", heading = "") => {
+        if (!isAgenticAiStream(student?.course || "")) return false;
+        const headingKey = String(heading || "").trim().toLowerCase();
+        if (!["strengths", "areas for improvement", "topic-wise stats"].includes(headingKey)) {
+            return false;
+        }
+        return /\b(node(?:\.js)?|react|sql|excel|power\s*bi|tableau|mern|mongodb|express|javascript)\b/i.test(String(value || ""));
+    };
     const isGenericPlaceholder = (value = "", heading = "") => {
         const clean = String(value || "").trim().toLowerCase().replace(/[.:]/g, "");
         const headingClean = String(heading || "").trim().toLowerCase().replace(/[.:]/g, "");
@@ -672,14 +751,16 @@ function enforceMandatorySectionLines(summaryText, student, analytics, fallbackS
         const sectionTitle = sectionTitles[i] || `Point ${i + 4}`;
         const preferred = stripLegacyLabel(points4To8[i] || "");
         const fallbackBody = stripLegacyLabel(fallbackPointTexts[i] || "");
-        const body = isGenericPlaceholder(preferred, sectionTitle) ? fallbackBody : preferred;
+        const body = (isGenericPlaceholder(preferred, sectionTitle) || hasCrossStreamSkillLeak(preferred, sectionTitle))
+            ? fallbackBody
+            : preferred;
         if (isGenericPlaceholder(body, sectionTitle)) continue;
         rebuilt.push(`${i + 4}. ${sectionTitle}: ${body}`);
     }
     return normalizeSummaryText(rebuilt.join("\n"));
 }
 
-function buildWalkinSummaryAnalytics(rows = []) {
+function buildWalkinSummaryAnalytics(rows = [], student = null) {
     const sectionTotals = {
         Aptitude: { scored: 0, max: 0, lowCount: 0, attempted: 0 },
         Technical: { scored: 0, max: 0, lowCount: 0, attempted: 0 },
@@ -766,7 +847,7 @@ function buildWalkinSummaryAnalytics(rows = []) {
             pct: stats.max > 0 ? Math.round((stats.scored / stats.max) * 100) : 0
         }))
         .sort((a, b) => (b.max - a.max) || (a.pct - b.pct));
-    const internalSkills = buildDescriptiveSkillAnalytics(rows);
+    const internalSkills = buildDescriptiveSkillAnalytics(rows, student);
     const codingSubmissionReviewLine = buildCodingSubmissionReview(rows);
 
     return {
@@ -880,6 +961,7 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
         "- Tableau",
         "- Data Science",
         "- MERN Stack (MongoDB, Express, React, Node.js)",
+        "- Agentic AI (agents, MCP, LangChain, LangGraph, RAG, vector databases, tool calling, orchestration)",
         "",
         "You will be provided with:",
         "- Question",
@@ -907,6 +989,7 @@ async function gradeDescriptiveAnswerDetailed(reference, studentAnswer, maxMarks
         "- For SQL/MySQL queries: validate syntax, SELECT logic, JOIN conditions, WHERE filters, GROUP BY, HAVING, ORDER BY. Accept logically equivalent queries. Deduct heavily when query structure or logic is wrong.",
         "- For Data Science: validate algorithm correctness, statistical reasoning, and conceptual clarity.",
         "- For MERN: validate frontend-backend architecture understanding and React, API, Databases clarity.",
+        "- For Agentic AI: validate concepts such as agents vs LLM apps, MCP, tool calling, RAG, vector databases, LangChain, LangGraph, orchestration, memory, and feedback loops.",
         "- For Excel: validate formula correctness and argument usage.",
         "- For Power BI / Tableau: validate function names (DAX/calculated fields), relationships, measures, and visualization reasoning; generic answers without required functions must not receive high marks.",
         "- For step/procedure questions: check whether key steps are present in logical order; missing major steps must reduce marks.",
@@ -1332,7 +1415,7 @@ function buildDeterministicWalkinSummary(student, rows) {
         .slice(0, 5)
         .map((entry) => entry.text)
         .join("; ");
-    const descriptiveSkill = buildDescriptiveSkillAnalytics(rows);
+    const descriptiveSkill = buildDescriptiveSkillAnalytics(rows, student);
     const skillSignalLine = descriptiveSkill.skills.length
         ? descriptiveSkill.skills
             .slice(0, 5)
@@ -1401,7 +1484,7 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         descriptive_answer: String(row.descriptive_answer || ""),
         reference_answer: String(row.reference_answer || "")
     }));
-    const analytics = buildWalkinSummaryAnalytics(rows);
+    const analytics = buildWalkinSummaryAnalytics(rows, student);
 
     const prompt = [
         "Create a concise, evidence-based performance summary for a walk-in student exam review.",
@@ -1423,6 +1506,8 @@ async function generateWalkinPerformanceSummary(student, rows = []) {
         "Never use the phrases 'Promotion blocked' or 'Next milestone'.",
         "Keep the summary technical, metric-heavy, and evidence-led.",
         "Infer internal skills from question_text + reference_answer + student descriptive_answer.",
+        "Only infer internal skills that are relevant to the student's stream. Never introduce unrelated stacks or tools from other streams.",
+        "For Agentic AI stream, relevant skill topics include MCP, Agentic AI fundamentals, LangChain, LangGraph, tool calling, RAG, vector databases, workflow orchestration, feedback loops, accuracy/validation, and Agentic AI challenges.",
         "Always restart numbering from 1.",
         "Output plain text only.",
         `Student: ${student?.name || "Unknown"} | Stream: ${student?.course || "Unknown"}`,

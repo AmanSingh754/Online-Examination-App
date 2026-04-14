@@ -7,6 +7,7 @@ let studentStartupSchemaSyncAttempted = false;
 const getWalkinDurationMinutes = (streamCode) => {
     if (streamCode === "DS") return 60;
     if (streamCode === "DA") return 50;
+    if (streamCode === "AAI") return 60;
     return 80; // MERN default
 };
 

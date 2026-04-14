@@ -1,7 +1,6 @@
 ﻿const express = require("express");
 const router = express.Router();
 const db = require("../db");
-const { generateRegularExamQuestions } = require("../Generator");
 const util = require("util");
 const queryAsync = util.promisify(db.query).bind(db);
 const { openaiClient, gradeDescriptiveAnswerDetailed, generateWalkinPerformanceSummary } = require("../llm");
@@ -10,7 +9,8 @@ const {
     getCanonicalWalkinStreamCode,
     getWalkinStreamCodeOrDefault,
     getWalkinStreamLabel,
-    getWalkinStreamQuestionKey
+    getWalkinStreamQuestionKey,
+    isWalkinCodingEnabled
 } = require("../utils/walkinStream");
 const { isAtLeastAge } = require("../utils/ageValidation");
 const { getBackgroundType, getRegularTechnicalSection } = require("../utils/courseBackground");
@@ -59,7 +59,8 @@ const WALKIN_TEMP_STATUS = {
 const STREAM_LABEL_BY_CODE = {
     DS: "Data Science",
     DA: "Data Analytics",
-    MERN: "MERN"
+    MERN: "MERN",
+    AAI: "Agentic AI"
 };
 
 const normalizeWalkinStreamLabel = (value) => {
@@ -187,8 +188,36 @@ const pickRandomRows = (rows, count) => {
     return source.slice(0, Math.max(0, Number(count || 0) || 0));
 };
 
+const validateRegularQuestionBankCoverage = (bank) => {
+    const aptitudeCount = Array.isArray(bank?.aptitude) ? bank.aptitude.length : 0;
+    const nonTechCount = Array.isArray(bank?.technical)
+        ? bank.technical.filter((row) => normalizeRegularBackgroundType(row.background_type) === "NON_TECH").length
+        : 0;
+    const techCount = Array.isArray(bank?.technical)
+        ? bank.technical.filter((row) => normalizeRegularBackgroundType(row.background_type) === "TECH").length
+        : 0;
+
+    const shortages = [];
+    if (aptitudeCount < REGULAR_APTITUDE_QUESTION_COUNT) {
+        shortages.push(`Aptitude bank has ${aptitudeCount}; at least ${REGULAR_APTITUDE_QUESTION_COUNT} required`);
+    }
+    if (nonTechCount < REGULAR_GLOBAL_TECH_BANK_COUNT) {
+        shortages.push(`Non-tech technical bank has ${nonTechCount}; at least ${REGULAR_GLOBAL_TECH_BANK_COUNT} required`);
+    }
+    if (techCount < REGULAR_GLOBAL_TECH_BANK_COUNT) {
+        shortages.push(`Tech technical bank has ${techCount}; at least ${REGULAR_GLOBAL_TECH_BANK_COUNT} required`);
+    }
+
+    if (shortages.length > 0) {
+        const error = new Error(`Regular question bank is incomplete. ${shortages.join(". ")}`);
+        error.code = "REGULAR_QUESTION_BANK_INCOMPLETE";
+        throw error;
+    }
+};
+
 const buildRegularExamQuestionsFromBank = async () => {
     const bank = await loadRegularQuestionBank();
+    validateRegularQuestionBankCoverage(bank);
     const aptitudeSource = pickRandomRows(bank.aptitude, REGULAR_APTITUDE_QUESTION_COUNT).map((row) => ({
         question_text: row.question_text,
         option_a: row.option_a,
@@ -228,20 +257,10 @@ const buildRegularExamQuestionsFromBank = async () => {
         question_type: row.question_type || "MCQ"
     }));
 
-    const missingAptitude = Math.max(0, REGULAR_APTITUDE_QUESTION_COUNT - aptitudeSource.length);
-    const missingTechnicalBasic = Math.max(0, REGULAR_GLOBAL_TECH_BANK_COUNT - technicalBasicSource.length);
-    const missingTechnicalAdvanced = Math.max(0, REGULAR_GLOBAL_TECH_BANK_COUNT - technicalAdvancedSource.length);
-
-    const fallbackQuestions =
-        missingAptitude || missingTechnicalBasic || missingTechnicalAdvanced
-            ? await generateRegularExamQuestions(missingAptitude, missingTechnicalBasic, missingTechnicalAdvanced)
-            : [];
-
     return [
         ...aptitudeSource,
         ...technicalBasicSource,
-        ...technicalAdvancedSource,
-        ...fallbackQuestions
+        ...technicalAdvancedSource
     ];
 };
 
@@ -320,6 +339,8 @@ const buildWalkinAutoPassword = (name, dob) => {
     }
     return `${namePrefix}${dayMonth}`;
 };
+
+const normalizeBulkCell = (value) => String(value ?? "").trim();
 
 const getInsertedId = (result, key) =>
     Number(result?.insertId || result?.[0]?.[key] || result?.rows?.[0]?.[key] || 0) || null;
@@ -443,6 +464,22 @@ async function ensureWalkinAnswerSectionColumn() {
 async function ensureRegularExamCollegeColumn() {
     if (regularExamCollegeColumnChecked) return;
     try {
+        const existingColumnRows = await queryAsync(
+            `SELECT 1
+             FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'regular_exams'
+               AND column_name = 'college_id'
+             LIMIT 1`
+        );
+        if (Array.isArray(existingColumnRows) && existingColumnRows.length > 0) {
+            regularExamCollegeColumnChecked = true;
+            return;
+        }
+    } catch (error) {
+        console.warn("Could not inspect regular_exams.college_id column:", String(error?.message || error));
+    }
+    try {
         await queryAsync(
             `ALTER TABLE regular_exams
              ADD COLUMN college_id INT NULL`
@@ -498,12 +535,25 @@ async function ensureWalkinTempStudentsTable() {
             email_id TEXT NOT NULL,
             contact_number TEXT NOT NULL,
             dob DATE NOT NULL,
-            stream TEXT NOT NULL CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN')),
+            stream TEXT NOT NULL CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI')),
             college_id INT NOT NULL REFERENCES college(college_id) ON UPDATE CASCADE ON DELETE RESTRICT,
             bde_name TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))
         )`
     );
+    try {
+        await queryAsync(`ALTER TABLE walkin_temp_students DROP CONSTRAINT IF EXISTS walkin_temp_students_stream_check`);
+        await queryAsync(
+            `ALTER TABLE walkin_temp_students
+             ADD CONSTRAINT walkin_temp_students_stream_check
+             CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI'))`
+        );
+    } catch (error) {
+        const msg = String(error?.message || "");
+        if (!/already exists/i.test(msg)) {
+            throw error;
+        }
+    }
     await queryAsync(`CREATE INDEX IF NOT EXISTS idx_walkin_temp_students_status ON walkin_temp_students(status)`);
     await queryAsync(`CREATE INDEX IF NOT EXISTS idx_walkin_temp_students_college_id ON walkin_temp_students(college_id)`);
     await queryAsync(`CREATE INDEX IF NOT EXISTS idx_walkin_temp_students_email_id ON walkin_temp_students(email_id)`);
@@ -552,7 +602,7 @@ async function ensureResultsSubmittedAtColumn() {
 async function loadWalkinQuestionSet(stream) {
     const streamCode = getWalkinStreamCodeOrDefault(stream);
     const normalizedStreamKey = getWalkinStreamQuestionKey(streamCode);
-    const includeCoding = streamCode !== "DA";
+    const includeCoding = isWalkinCodingEnabled(streamCode);
     const aptitudeRows = await queryAsync(`
         SELECT question_text, option_a, option_b, option_c, option_d, correct_option
         FROM walkin_aptitude_questions
@@ -880,6 +930,7 @@ async function ensureWalkinExamStreamCodeColumn() {
                 WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('DS', 'DATASCIENCE') THEN 'DS'
                 WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('DA', 'DATAANALYTICS') THEN 'DA'
                 WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('MERN', 'FULLSTACK') THEN 'MERN'
+                WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('AAI', 'AGENTICAI') THEN 'AAI'
                 ELSE 'MERN'
             END
             WHERE stream_code IS NULL
@@ -1572,7 +1623,7 @@ router.get("/results/:collegeId", async (req, res) => {
     }
 });
 
-router.get("/result-answers/:resultId", (req, res) => {
+router.get("/result-answers/:resultId", async (req, res) => {
     const { resultId } = req.params;
     if (!resultId) {
         return res.status(400).json({ success: false });
@@ -1582,6 +1633,7 @@ router.get("/result-answers/:resultId", (req, res) => {
         SELECT 
             q.question_id,
             q.question_text,
+            q.section_name,
             q.option_a,
             q.option_b,
             q.option_c,
@@ -1600,14 +1652,73 @@ router.get("/result-answers/:resultId", (req, res) => {
         WHERE r.result_id = ?
         ORDER BY q.question_id
     `;
+    const metaQuery = `
+        SELECT r.result_id,
+               r.student_id,
+               s.name AS student_name,
+               r.exam_id,
+               r.attempt_status,
+               r.result_status,
+               r.total_marks,
+               r.submitted_at,
+               r.feedback_text,
+               r.feedback_question_text,
+               r.feedback_submission_mode,
+               COALESCE(q.total_questions, 0) AS total_questions,
+               sa_stats.correct_answers AS correct_answers,
+               CASE
+                   WHEN q.total_questions > 0 AND sa_stats.correct_answers IS NOT NULL
+                       THEN ROUND((sa_stats.correct_answers::numeric * 100.0) / q.total_questions, 2)
+                   ELSE NULL
+               END AS percentage
+        FROM regular_student_results r
+        JOIN regular_exams e ON e.exam_id = r.exam_id
+        JOIN students s ON s.student_id = r.student_id
+        LEFT JOIN (
+            SELECT sa.student_id,
+                   sa.exam_id,
+                   sa.question_set_id,
+                   COUNT(*) AS answered_count,
+                   SUM(CASE WHEN sa.selected_option = q.correct_answer THEN 1 ELSE 0 END) AS correct_answers
+            FROM regular_student_answers sa
+            JOIN students st ON st.student_id = sa.student_id
+            JOIN regular_exam_questions q
+              ON sa.question_id = q.question_id
+             AND (${getRegularQuestionSetJoinKey("sa")} = 0 OR q.question_set_id = sa.question_set_id)
+            WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
+            GROUP BY sa.student_id, sa.exam_id, sa.question_set_id
+        ) sa_stats ON sa_stats.student_id = r.student_id
+                 AND sa_stats.exam_id = r.exam_id
+                 AND ${getRegularQuestionSetJoinKey("sa_stats")} = ${getRegularQuestionSetJoinKey("r")}
+        LEFT JOIN (
+            SELECT q.exam_id, q.question_set_id, st.student_id, COUNT(*) AS total_questions
+            FROM regular_exam_questions q
+            JOIN regular_student_results rsr ON rsr.exam_id = q.exam_id
+                                         AND ${getRegularQuestionSetJoinKey("rsr")} = q.question_set_id
+            JOIN students st ON st.student_id = rsr.student_id
+            WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
+            GROUP BY q.exam_id, q.question_set_id, st.student_id
+        ) q ON q.exam_id = e.exam_id
+           AND q.question_set_id = r.question_set_id
+           AND q.student_id = r.student_id
+        WHERE r.result_id = ?
+        LIMIT 1
+    `;
 
-    db.query(query, [resultId], (err, rows) => {
-        if (err) {
-            console.error("Result questions error:", err);
-            return res.status(500).json({ success: false });
-        }
-        res.json({ success: true, questions: rows || [] });
-    });
+    try {
+        const [rows, reviewRows] = await Promise.all([
+            queryAsync(query, [resultId]),
+            queryAsync(metaQuery, [resultId])
+        ]);
+        return res.json({
+            success: true,
+            questions: rows || [],
+            review: reviewRows?.[0] || null
+        });
+    } catch (err) {
+        console.error("Result questions error:", err);
+        return res.status(500).json({ success: false });
+    }
 });
 
 /* ================= STUDENT PROFILES ================= */
@@ -1638,7 +1749,7 @@ router.get("/students/:collegeId", (req, res) => {
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN') THEN 'WALKIN'
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) = 'REGULAR' THEN 'REGULAR'
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.course, '')), ' ', '')) IN
-                        ('DS', 'DATASCIENCE', 'DA', 'DATAANALYTICS', 'MERN', 'FULLSTACK') THEN 'WALKIN'
+                        ('DS', 'DATASCIENCE', 'DA', 'DATAANALYTICS', 'MERN', 'FULLSTACK', 'AAI', 'AGENTICAI') THEN 'WALKIN'
                    ELSE 'REGULAR'
                END AS student_type,
                s.status AS student_status,
@@ -2171,7 +2282,7 @@ router.get("/walkin/final-results/:collegeId", async (req, res) => {
             params.push(scopedBdeName);
         }
         const scopedSql = `
-            SELECT wfr.*, s.name, s.college_id, COALESCE(we.stream, s.course) AS stream
+            SELECT wfr.*, s.name, s.email_id, s.contact_number, s.college_id, COALESCE(we.stream, s.course) AS stream
             FROM walkin_final_results wfr
             JOIN students s ON s.student_id = wfr.student_id
             LEFT JOIN walkin_exams we ON we.walkin_exam_id = wfr.exam_id
@@ -3060,101 +3171,98 @@ router.post("/walkin/temp-students/:id/approve", async (req, res) => {
     }
 
     try {
-        await queryAsync(`BEGIN`);
-
-        const rows = await queryAsync(
-            `
-            SELECT id, name, email_id, contact_number, dob, stream, college_id, bde_name, status
-            FROM walkin_temp_students
-            WHERE id = ?
-            FOR UPDATE
-            `,
-            [requestId]
-        );
-        const requestRow = rows?.[0];
-        if (!requestRow) {
-            await queryAsync(`ROLLBACK`);
-            return res.status(404).json({ success: false, message: "Walk-in request not found" });
-        }
-        if (String(requestRow.status || "").toUpperCase() !== WALKIN_TEMP_STATUS.PENDING) {
-            await queryAsync(`ROLLBACK`);
-            return res.status(400).json({ success: false, message: "Only pending requests can be approved" });
-        }
-
-        const duplicateRows = await queryAsync(
-            `SELECT student_id FROM students WHERE LOWER(TRIM(email_id)) = LOWER(?) LIMIT 1`,
-            [requestRow.email_id]
-        );
-        if (duplicateRows && duplicateRows.length > 0) {
-            await queryAsync(`ROLLBACK`);
-            return res.status(400).json({ success: false, message: "A student account with this email already exists" });
-        }
-
-        const streamLabel = normalizeWalkinStreamLabel(requestRow.stream);
-        if (!streamLabel) {
-            await queryAsync(`ROLLBACK`);
-            return res.status(400).json({ success: false, message: "Invalid stream on walk-in request" });
-        }
-
-        const insertStudentResult = await queryAsync(
-            `
-            INSERT INTO students
-            (name, email_id, contact_number, dob, course, college_id, student_type, bde_name)
-            VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
-            RETURNING student_id
-            `,
-            [
-                String(requestRow.name || "").trim(),
-                String(requestRow.email_id || "").trim(),
-                String(requestRow.contact_number || "").trim(),
-                requestRow.dob,
-                streamLabel,
-                Number(requestRow.college_id || 0),
-                String(requestRow.bde_name || "").trim()
-            ]
-        );
-
-        const newStudentId = getInsertedId(insertStudentResult, "student_id");
-        if (!newStudentId) {
-            await queryAsync(`ROLLBACK`);
-            return res.status(500).json({ success: false, message: "Could not create student account" });
-        }
-
-        const autoPassword = buildWalkinAutoPassword(requestRow.name, requestRow.dob);
-        await queryAsync(
-            `
-            INSERT INTO student_credentials
-            (student_id, password, role_id)
-            VALUES (?, ?, 1)
-            ON CONFLICT (student_id) DO UPDATE
-            SET password = EXCLUDED.password
-            `,
-            [newStudentId, autoPassword]
-        );
-
-        await queryAsync(
-            `UPDATE walkin_temp_students
-             SET status = ?
-             WHERE id = ?`,
-            [WALKIN_TEMP_STATUS.APPROVED, requestId]
-        );
-
-        await queryAsync(`COMMIT`);
-        return res.json({
-            success: true,
-            message: "Walk-in request approved and student account created.",
-            credentials: {
-                studentId: newStudentId,
-                email: String(requestRow.email_id || "").trim(),
-                password: autoPassword
+        const approvalResult = await db.withTransaction(async (txQuery) => {
+            const rows = await txQuery(
+                `
+                SELECT id, name, email_id, contact_number, dob, stream, college_id, bde_name, status
+                FROM walkin_temp_students
+                WHERE id = ?
+                FOR UPDATE
+                `,
+                [requestId]
+            );
+            const requestRow = rows?.[0];
+            if (!requestRow) {
+                return { statusCode: 404, body: { success: false, message: "Walk-in request not found" } };
             }
+            if (String(requestRow.status || "").toUpperCase() !== WALKIN_TEMP_STATUS.PENDING) {
+                return { statusCode: 400, body: { success: false, message: "Only pending requests can be approved" } };
+            }
+
+            const duplicateRows = await txQuery(
+                `SELECT student_id FROM students WHERE LOWER(TRIM(email_id)) = LOWER(?) LIMIT 1`,
+                [requestRow.email_id]
+            );
+            if (duplicateRows && duplicateRows.length > 0) {
+                return {
+                    statusCode: 400,
+                    body: { success: false, message: "A student account with this email already exists" }
+                };
+            }
+
+            const streamLabel = normalizeWalkinStreamLabel(requestRow.stream);
+            if (!streamLabel) {
+                return { statusCode: 400, body: { success: false, message: "Invalid stream on walk-in request" } };
+            }
+
+            const insertStudentResult = await txQuery(
+                `
+                INSERT INTO students
+                (name, email_id, contact_number, dob, course, college_id, student_type, bde_name)
+                VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
+                RETURNING student_id
+                `,
+                [
+                    String(requestRow.name || "").trim(),
+                    String(requestRow.email_id || "").trim(),
+                    String(requestRow.contact_number || "").trim(),
+                    requestRow.dob,
+                    streamLabel,
+                    Number(requestRow.college_id || 0),
+                    String(requestRow.bde_name || "").trim()
+                ]
+            );
+
+            const newStudentId = getInsertedId(insertStudentResult, "student_id");
+            if (!newStudentId) {
+                throw new Error("Could not create student account");
+            }
+
+            const autoPassword = buildWalkinAutoPassword(requestRow.name, requestRow.dob);
+            await txQuery(
+                `
+                INSERT INTO student_credentials
+                (student_id, password, role_id)
+                VALUES (?, ?, 1)
+                ON CONFLICT (student_id) DO UPDATE
+                SET password = EXCLUDED.password
+                `,
+                [newStudentId, autoPassword]
+            );
+
+            await txQuery(
+                `UPDATE walkin_temp_students
+                 SET status = ?
+                 WHERE id = ?`,
+                [WALKIN_TEMP_STATUS.APPROVED, requestId]
+            );
+
+            return {
+                statusCode: 200,
+                body: {
+                    success: true,
+                    message: "Walk-in request approved and student account created.",
+                    credentials: {
+                        studentId: newStudentId,
+                        email: String(requestRow.email_id || "").trim(),
+                        password: autoPassword
+                    }
+                }
+            };
         });
+
+        return res.status(approvalResult.statusCode).json(approvalResult.body);
     } catch (error) {
-        try {
-            await queryAsync(`ROLLBACK`);
-        } catch (_) {
-            // no-op rollback best-effort
-        }
         console.error("Approve walk-in temp student error:", error);
         return res.status(500).json({ success: false, message: "Could not approve walk-in request" });
     }
@@ -3220,7 +3328,7 @@ router.post("/students/walkin", (req, res) => {
     }
 
     if (!streamCode) {
-        return res.status(400).json({ success: false, message: "Invalid walk-in stream. Use DS, DA, or MERN." });
+        return res.status(400).json({ success: false, message: "Invalid walk-in stream. Use DS, DA, MERN, or AAI." });
     }
 
     if (!collegeId) {
@@ -3456,6 +3564,150 @@ router.post("/students/regular", async (req, res) => {
     } catch (error) {
         console.error("Regular student creation error:", error);
         return res.status(500).json({ success: false, message: "Could not create regular student account" });
+    }
+});
+
+router.post("/students/regular/bulk", async (req, res) => {
+    const collegeId = Number(req.body?.collegeId || 0);
+    const sourceRows = Array.isArray(req.body?.students) ? req.body.students : [];
+
+    if (!collegeId) {
+        return res.status(400).json({ success: false, message: "Select a college for this bulk upload." });
+    }
+    if (!Number.isInteger(collegeId) || collegeId <= 0) {
+        return res.status(400).json({ success: false, message: "Invalid college selection" });
+    }
+    if (sourceRows.length === 0) {
+        return res.status(400).json({ success: false, message: "Upload at least one regular student row." });
+    }
+
+    try {
+        const collegeRows = await queryAsync(
+            `SELECT college_id, college_name FROM college WHERE college_id = ? LIMIT 1`,
+            [collegeId]
+        );
+        if (!collegeRows || collegeRows.length === 0) {
+            return res.status(400).json({ success: false, message: "Selected college not found" });
+        }
+
+        const collegeName = String(collegeRows[0]?.college_name || "").trim();
+        const createdStudents = [];
+        const failedStudents = [];
+        const seenEmails = new Set();
+
+        for (let index = 0; index < sourceRows.length; index += 1) {
+            const row = sourceRows[index] || {};
+            const rowNumber = Number(row?.rowNumber || 0) || index + 2;
+            const name = normalizeBulkCell(row?.name);
+            const email = normalizeBulkCell(row?.email);
+            const phone = normalizeBulkCell(row?.phone);
+            const dob = normalizeBulkCell(row?.dob);
+            const course = normalizeBulkCell(row?.course);
+            const failureBase = { rowNumber, name, email, phone, dob, course };
+
+            if (!name || !email || !phone || !dob || !course) {
+                failedStudents.push({ ...failureBase, reason: "Missing one or more required fields" });
+                continue;
+            }
+
+            const normalizedEmail = email.toLowerCase();
+            if (seenEmails.has(normalizedEmail)) {
+                failedStudents.push({ ...failureBase, reason: "Duplicate email in the uploaded file" });
+                continue;
+            }
+            seenEmails.add(normalizedEmail);
+
+            if (!isAtLeastAge(dob, 18)) {
+                failedStudents.push({ ...failureBase, reason: "Student must be at least 18 years old" });
+                continue;
+            }
+
+            const backgroundType = await getResolvedBackgroundType(course);
+            if (!backgroundType || !getRegularTechnicalSection(backgroundType)) {
+                failedStudents.push({
+                    ...failureBase,
+                    reason: "Course is not mapped to a valid TECH/NON_TECH regular background"
+                });
+                continue;
+            }
+
+            const duplicateRows = await queryAsync(
+                `SELECT student_id FROM students WHERE LOWER(TRIM(email_id)) = LOWER(TRIM(?)) LIMIT 1`,
+                [email]
+            );
+            if (duplicateRows && duplicateRows.length > 0) {
+                failedStudents.push({ ...failureBase, reason: "Email already registered" });
+                continue;
+            }
+
+            try {
+                const createResult = await db.withTransaction(async (txQuery) => {
+                    const insertStudentResult = await txQuery(
+                        `
+                        INSERT INTO students
+                        (name, email_id, contact_number, dob, course, background_type, college_id, student_type, bde_name)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'REGULAR', NULL)
+                        RETURNING student_id
+                        `,
+                        [name, email, phone, dob, course, backgroundType, collegeId]
+                    );
+
+                    const newStudentId = getInsertedId(insertStudentResult, "student_id");
+                    if (!newStudentId) {
+                        throw new Error("Could not create regular student account");
+                    }
+
+                    const autoPassword = buildWalkinAutoPassword(name, dob);
+                    await txQuery(
+                        `
+                        INSERT INTO student_credentials
+                        (student_id, password)
+                        VALUES (?, ?)
+                        `,
+                        [newStudentId, autoPassword]
+                    );
+
+                    return {
+                        studentId: newStudentId,
+                        password: autoPassword
+                    };
+                });
+
+                createdStudents.push({
+                    rowNumber,
+                    studentId: createResult.studentId,
+                    name,
+                    email,
+                    phone,
+                    dob,
+                    course,
+                    backgroundType,
+                    password: createResult.password
+                });
+            } catch (error) {
+                const message = String(error?.message || error);
+                const normalizedMessage = message.toLowerCase();
+                const reason = normalizedMessage.includes("duplicate key") || normalizedMessage.includes("unique")
+                    ? "Email already registered"
+                    : "Could not create this student";
+                failedStudents.push({ ...failureBase, reason });
+            }
+        }
+
+        return res.json({
+            success: true,
+            collegeId,
+            collegeName,
+            registeredCount: createdStudents.length,
+            failedCount: failedStudents.length,
+            hasFailures: failedStudents.length > 0,
+            message: `${createdStudents.length} regular student${createdStudents.length === 1 ? "" : "s"} registered successfully.`,
+            createdStudents,
+            failedStudents
+        });
+    } catch (error) {
+        console.error("Regular bulk student creation error:", error);
+        return res.status(500).json({ success: false, message: "Could not process the bulk regular student upload" });
     }
 });
 
@@ -3825,7 +4077,12 @@ router.post("/generate-questions/:examId", async (req, res) => {
                 );
             } catch (error) {
                 console.error("Question generation error:", error);
-                res.status(500).json({ success: false, message: "Question generation failed" });
+                const errorCode = String(error?.code || "").trim().toUpperCase();
+                const safeMessage =
+                    errorCode === "REGULAR_QUESTION_BANK_INCOMPLETE"
+                        ? String(error?.message || "Regular question bank is incomplete.")
+                        : "Question generation failed";
+                res.status(500).json({ success: false, message: safeMessage });
             }
         }
     );

@@ -8,7 +8,7 @@ const WALKIN_OPTION_KEYS = [
   { key: "option_c", label: "C" },
   { key: "option_d", label: "D" }
 ];
-const WALKIN_STREAM_OPTIONS = ["Data Analytics", "Data Science", "MERN"];
+const WALKIN_STREAM_OPTIONS = ["Data Analytics", "Data Science", "MERN", "Agentic AI"];
 
 const parseFraction = (value) => {
   const match = String(value || "").match(/([0-9]+(?:\.[0-9]+)?)\s*\/\s*([0-9]+(?:\.[0-9]+)?)/);
@@ -250,7 +250,12 @@ const isDataAnalyticsStream = (value) => {
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
-  return normalized === "DA" || normalized === "DATAANALYTICS";
+  return (
+    normalized === "DA" ||
+    normalized === "DATAANALYTICS" ||
+    normalized === "AAI" ||
+    normalized === "AGENTICAI"
+  );
 };
 
 const normalizeStudentTypeLabel = (value) => {
@@ -1555,8 +1560,7 @@ function BdeDashboard() {
                       </thead>
                       <tbody>
                         {walkinResultsRows.map((row) => {
-                          const streamKey = String(row.stream || "").trim().toLowerCase().replace(/\s+/g, "");
-                          const isDataAnalytics = streamKey === "dataanalytics" || streamKey === "da";
+                          const hideCodingForStream = isDataAnalyticsStream(row.stream);
                           const codingTotal =
                             Number(row.coding_easy_marks || 0) +
                             Number(row.coding_medium_marks || 0) +
@@ -1569,7 +1573,7 @@ function BdeDashboard() {
                               <td>{row.exam_id}</td>
                               <td>{Number(row.aptitude_marks || 0).toFixed(2)}</td>
                               <td>{Number(row.technical_marks || 0).toFixed(2)}</td>
-                              <td>{isDataAnalytics ? "N/A" : codingTotal.toFixed(2)}</td>
+                              <td>{hideCodingForStream ? "N/A" : codingTotal.toFixed(2)}</td>
                               <td>{Number(row.total_marks || 0).toFixed(2)}</td>
                               <td>
                                 <button

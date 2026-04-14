@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import * as XLSX from "xlsx";
 import useBodyClass from "../hooks/useBodyClass.js";
 import AdminAnalyticsSection from "./admin-dashboard/AdminAnalyticsSection.jsx";
 
@@ -36,13 +37,14 @@ const NON_TECH_REGULAR_COURSES = [
 
 const REGULAR_COURSES = [...TECH_REGULAR_COURSES, ...NON_TECH_REGULAR_COURSES];
 
-const WALKIN_STREAMS = ["Data Science", "Data Analytics", "MERN"]
+const WALKIN_STREAMS = ["Data Science", "Data Analytics", "MERN", "Agentic AI"];
 const WALKIN_OPTION_KEYS = [
   { key: "option_a", label: "A" },
   { key: "option_b", label: "B" },
   { key: "option_c", label: "C" },
   { key: "option_d", label: "D" }
 ];;
+const REGULAR_BULK_TEMPLATE_COLUMNS = ["Name", "Email", "Phone", "DOB", "Course"];
 
 const normalizeCourseForBackground = (value) =>
   String(value || "")
@@ -103,8 +105,45 @@ const getRegularCoursesByBackground = (background) => {
   return [];
 };
 
+const parseStoredTimestampParts = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const match = raw.match(
+    /^(\d{4})-(\d{2})-(\d{2})(?:[T\s](\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?(?:Z)?$/
+  );
+  if (!match) return null;
+  return {
+    year: match[1],
+    month: match[2],
+    day: match[3],
+    hour: match[4] || "00",
+    minute: match[5] || "00",
+    second: match[6] || "00"
+  };
+};
+
+const formatStoredDateLabel = (dateKey) => {
+  const parts = parseStoredTimestampParts(`${dateKey}T00:00:00`);
+  if (!parts) return dateKey;
+  const parsed = new Date(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day)
+  );
+  if (Number.isNaN(parsed.getTime())) return dateKey;
+  return new Intl.DateTimeFormat("en-IN", {
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  }).format(parsed);
+};
+
 const formatIST24 = (value) => {
   if (!value) return "--";
+  const storedParts = parseStoredTimestampParts(value);
+  if (storedParts) {
+    return `${storedParts.day}/${storedParts.month}/${storedParts.year}, ${storedParts.hour}:${storedParts.minute}`;
+  }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return String(value);
   return new Intl.DateTimeFormat("en-IN", {
@@ -144,6 +183,93 @@ const toISTTimeInput = (value) => {
   }).formatToParts(parsed);
   const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${map.hour}:${map.minute}`;
+};
+
+const toIsoDateString = (date) => {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const normalizeSpreadsheetDob = (value) => {
+  if (value instanceof Date) {
+    return toIsoDateString(value);
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (parsed?.y && parsed?.m && parsed?.d) {
+      return `${parsed.y}-${String(parsed.m).padStart(2, "0")}-${String(parsed.d).padStart(2, "0")}`;
+    }
+  }
+
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const slashMatch = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+  if (slashMatch) {
+    const [, day, month, year] = slashMatch;
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) return raw;
+  return toIsoDateString(parsed);
+};
+
+const getSpreadsheetCellValue = (row, keys) => {
+  const entries = Object.entries(row || {});
+  for (const expectedKey of keys) {
+    const match = entries.find(([key]) => String(key || "").trim().toLowerCase() === expectedKey.toLowerCase());
+    if (match) return match[1];
+  }
+  return "";
+};
+
+const getRegistrationDateKey = (value) => {
+  if (!value) return "unknown";
+  const storedParts = parseStoredTimestampParts(value);
+  if (storedParts) {
+    return `${storedParts.year}-${storedParts.month}-${storedParts.day}`;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "unknown";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(parsed);
+  const map = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${map.year}-${map.month}-${map.day}`;
+};
+
+const formatRegistrationDateLabel = (value) => {
+  if (value === "unknown") return "Registration Date Unavailable";
+  return formatStoredDateLabel(value);
+};
+
+const buildStudentDateGroups = (students) => {
+  const source = Array.isArray(students) ? [...students] : [];
+  source.sort((left, right) => {
+    const leftTime = left?.created_at ? new Date(left.created_at).getTime() : 0;
+    const rightTime = right?.created_at ? new Date(right.created_at).getTime() : 0;
+    if (leftTime !== rightTime) return rightTime - leftTime;
+    return Number(right?.student_id || 0) - Number(left?.student_id || 0);
+  });
+
+  const groups = [];
+  source.forEach((student) => {
+    const dateKey = getRegistrationDateKey(student?.created_at);
+    const lastGroup = groups[groups.length - 1];
+    if (!lastGroup || lastGroup.dateKey !== dateKey) {
+      groups.push({ dateKey, students: [student] });
+      return;
+    }
+    lastGroup.students.push(student);
+  });
+  return groups;
 };
 
 const parseFraction = (value) => {
@@ -237,6 +363,37 @@ const normalizeBdeNameForDashboard = (value, registeredBdeNames = new Set()) => 
     return raw;
   }
   return `Others(${raw})`;
+};
+
+const normalizeRegularReviewSection = (value) => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "APTITUDE") return "APTITUDE";
+  if (normalized === "TECHNICAL_BASIC" || normalized === "TECHNICAL_ADVANCED") return "TECHNICAL";
+  return normalized || "GENERAL";
+};
+
+const buildRegularReviewSectionMetrics = (questions = []) => {
+  const sectionMap = new Map();
+  (Array.isArray(questions) ? questions : []).forEach((question) => {
+    const sectionKey = normalizeRegularReviewSection(question?.section_name);
+    const current = sectionMap.get(sectionKey) || { correct: 0, total: 0, attempted: 0, wrong: 0 };
+    current.total += 1;
+    const selected = String(question?.selected_option || "").trim().toUpperCase();
+    const correct = String(question?.correct_answer || "").trim().toUpperCase();
+    if (selected) {
+      current.attempted += 1;
+      if (selected === correct) {
+        current.correct += 1;
+      } else {
+        current.wrong += 1;
+      }
+    }
+    sectionMap.set(sectionKey, current);
+  });
+  return {
+    aptitude: sectionMap.get("APTITUDE") || { correct: 0, total: 0, attempted: 0, wrong: 0 },
+    technical: sectionMap.get("TECHNICAL") || { correct: 0, total: 0, attempted: 0, wrong: 0 }
+  };
 };
 
 const CODING_LEVEL_ORDER = ["Easy", "Medium", "Hard"];
@@ -390,13 +547,18 @@ const buildCodingSummaryFromAnswers = (answers) => {
   };
 };
 
-const WALKIN_COURSE_KEYS = new Set(["DS", "DATASCIENCE", "DA", "DATAANALYTICS", "MERN", "FULLSTACK"]);
+const WALKIN_COURSE_KEYS = new Set(["DS", "DATASCIENCE", "DA", "DATAANALYTICS", "MERN", "FULLSTACK", "AAI", "AGENTICAI"]);
 const isDataAnalyticsStream = (value) => {
   const normalized = String(value || "")
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "");
-  return normalized === "DA" || normalized === "DATAANALYTICS";
+  return (
+    normalized === "DA" ||
+    normalized === "DATAANALYTICS" ||
+    normalized === "AAI" ||
+    normalized === "AGENTICAI"
+  );
 };
 const getWalkinStreamLabel = (value) => {
   const normalized = String(value || "")
@@ -406,6 +568,7 @@ const getWalkinStreamLabel = (value) => {
   if (normalized === "DS" || normalized.includes("DATASCIENCE")) return "Data Science";
   if (normalized === "DA" || normalized.includes("DATAANALYTICS")) return "Data Analytics";
   if (normalized === "MERN" || normalized.includes("FULLSTACK")) return "MERN";
+  if (normalized === "AAI" || normalized.includes("AGENTICAI")) return "Agentic AI";
   return "";
 };
 const isWalkinStudentRow = (student) => {
@@ -493,6 +656,7 @@ function AdminDashboard() {
   const [regularQuestionSheetLoading, setRegularQuestionSheetLoading] = useState(false);
   const [regularQuestionSheetError, setRegularQuestionSheetError] = useState("");
   const [regularCreateOpen, setRegularCreateOpen] = useState(false);
+  const [regularCreateMode, setRegularCreateMode] = useState("manual");
   const [walkinQuestionEditor, setWalkinQuestionEditor] = useState({
     open: false,
     category: "",
@@ -536,10 +700,15 @@ function AdminDashboard() {
   const [walkinReviewLoading, setWalkinReviewLoading] = useState(false);
   const [walkinReviewError, setWalkinReviewError] = useState("");
   const [walkinReviewView, setWalkinReviewView] = useState("summary");
+  const [regularReviewData, setRegularReviewData] = useState(null);
+  const [regularReviewLoading, setRegularReviewLoading] = useState(false);
+  const [regularReviewError, setRegularReviewError] = useState("");
+  const [regularReviewView, setRegularReviewView] = useState("summary");
   const [walkinResultsSearch, setWalkinResultsSearch] = useState("");
   const [walkinResultsStreamFilter, setWalkinResultsStreamFilter] = useState("ALL");
   const [walkinStudentsSearch, setWalkinStudentsSearch] = useState("");
   const [walkinStudentsStreamFilter, setWalkinStudentsStreamFilter] = useState("ALL");
+  const [walkinResultsExportStatus, setWalkinResultsExportStatus] = useState("");
   const [bdeStudentsSearch, setBdeStudentsSearch] = useState("");
   const [bdeStudentsBdeFilter, setBdeStudentsBdeFilter] = useState("ALL");
   const [bdeStudentsCourseFilter, setBdeStudentsCourseFilter] = useState("ALL");
@@ -585,6 +754,12 @@ function AdminDashboard() {
   const [regularStatus, setRegularStatus] = useState("");
   const [regularCredentials, setRegularCredentials] = useState(null);
   const [regularCreateSubmitting, setRegularCreateSubmitting] = useState(false);
+  const [regularBulkCollegeId, setRegularBulkCollegeId] = useState("");
+  const [regularBulkRows, setRegularBulkRows] = useState([]);
+  const [regularBulkFileName, setRegularBulkFileName] = useState("");
+  const [regularBulkStatus, setRegularBulkStatus] = useState("");
+  const [regularBulkSubmitting, setRegularBulkSubmitting] = useState(false);
+  const [regularBulkResult, setRegularBulkResult] = useState(null);
   const [collegeOptions, setCollegeOptions] = useState([]);
   const [collegeError, setCollegeError] = useState("");
   const [bdeOptions, setBdeOptions] = useState([]);
@@ -599,6 +774,7 @@ function AdminDashboard() {
   });
   const [passwordChangeStatus, setPasswordChangeStatus] = useState("");
   const [passwordChangeSaving, setPasswordChangeSaving] = useState(false);
+  const regularBulkFileInputRef = useRef(null);
   const landingSection = location.state?.activeSection;
 
   const renderWalkinOptions = (item) => {
@@ -645,6 +821,35 @@ function AdminDashboard() {
               <span className="option-label">{label}.</span>
               <span className="option-text">{item[key]}</span>
               {isCorrect ? <span className="option-result-badge">Correct</span> : null}
+            </p>
+          ) : null;
+        })}
+      </div>
+    );
+  };
+
+  const renderRegularReviewOptions = (item) => {
+    const hasOptions = WALKIN_OPTION_KEYS.some(({ key }) => item[key]);
+    if (!hasOptions) return null;
+    const selectedOption = String(item?.selected_option || "").trim().toUpperCase();
+    const correctOption = String(item?.correct_answer || "").trim().toUpperCase();
+    return (
+      <div className="walkin-options">
+        {WALKIN_OPTION_KEYS.map(({ key, label }) => {
+          const normalizedLabel = String(label || "").trim().toUpperCase();
+          const isSelected = Boolean(selectedOption) && selectedOption === normalizedLabel;
+          const isCorrect = Boolean(correctOption) && correctOption === normalizedLabel;
+          const optionStateClass = isSelected
+            ? (isCorrect ? "option-selected-correct" : "option-selected-wrong")
+            : (isCorrect ? "option-correct-answer" : "");
+          const resultBadge = isSelected
+            ? (isCorrect ? "Your Answer ✓" : "Your Answer ✗")
+            : (isCorrect ? "Correct ✓" : "");
+          return item[key] ? (
+            <p className={`item-option ${optionStateClass}`.trim()} key={key}>
+              <span className="option-label">{label}.</span>
+              <span className="option-text">{item[key]}</span>
+              {resultBadge ? <span className="option-result-badge">{resultBadge}</span> : null}
             </p>
           ) : null;
         })}
@@ -731,10 +936,6 @@ function AdminDashboard() {
         const activeCollegeId = String(collegeId || data[0].college_id || "");
         setSelectedCollegeId(activeCollegeId);
         localStorage.setItem("collegeId", activeCollegeId);
-        setRegularForm((prev) => ({
-          ...prev,
-          collegeId: prev.collegeId || activeCollegeId
-        }));
       } catch (err) {
         console.error("College load error:", err);
         setCollegeError("Could not load colleges.");
@@ -794,22 +995,27 @@ function AdminDashboard() {
 
   const viewResultDetail = async (result) => {
     if (!result?.result_id) return;
+    setRegularReviewLoading(true);
+    setRegularReviewError("");
+    setRegularReviewView("summary");
     try {
       const response = await fetch(`/admin/result-answers/${result.result_id}`);
       const data = await response.json();
       if (data.success) {
-        navigate("/admin/result-review", {
-          state: {
-            resultId: result.result_id,
-            result,
-            questions: data.questions || []
-          }
+        setRegularReviewData({
+          result,
+          review: data.review || null,
+          questions: data.questions || []
         });
+        setActiveSection("regular-review");
+      } else {
+        setRegularReviewError(data.message || "Could not load regular result review.");
       }
     } catch (err) {
       console.error("Result detail error:", err);
+      setRegularReviewError("Could not load regular result review.");
     } finally {
-      // no-op
+      setRegularReviewLoading(false);
     }
   };
 
@@ -1145,6 +1351,138 @@ function AdminDashboard() {
       setRegularStatus("Server error while creating regular student.");
     } finally {
       setRegularCreateSubmitting(false);
+    }
+  };
+
+  const handleDownloadRegularBulkTemplate = useCallback(() => {
+    const worksheet = XLSX.utils.aoa_to_sheet([REGULAR_BULK_TEMPLATE_COLUMNS]);
+    worksheet["!cols"] = [
+      { wch: 24 },
+      { wch: 32 },
+      { wch: 16 },
+      { wch: 14 },
+      { wch: 18 }
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Regular Students");
+    XLSX.writeFile(workbook, "regular-student-bulk-template.xlsx");
+    setRegularBulkStatus("Downloaded the regular student bulk upload template.");
+  }, []);
+
+  const clearRegularBulkUpload = useCallback(() => {
+    setRegularBulkRows([]);
+    setRegularBulkFileName("");
+    setRegularBulkResult(null);
+    if (regularBulkFileInputRef.current) {
+      regularBulkFileInputRef.current.value = "";
+    }
+  }, []);
+
+  const handleRegularBulkFileChange = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    setRegularBulkStatus("");
+    setRegularBulkResult(null);
+    setRegularBulkRows([]);
+    setRegularBulkFileName(file?.name || "");
+
+    if (!file) {
+      return;
+    }
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+      const firstSheetName = workbook.SheetNames?.[0];
+      if (!firstSheetName) {
+        throw new Error("The uploaded workbook has no sheets.");
+      }
+
+      const sheet = workbook.Sheets[firstSheetName];
+      const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: true });
+      const parsedRows = rawRows
+        .map((row, index) => {
+          const name = String(getSpreadsheetCellValue(row, ["Name", "Full Name", "Student Name"]) || "").trim();
+          const email = String(getSpreadsheetCellValue(row, ["Email", "Email ID"]) || "").trim();
+          const phone = String(getSpreadsheetCellValue(row, ["Phone", "Phone Number", "Contact Number"]) || "").trim();
+          const dob = normalizeSpreadsheetDob(getSpreadsheetCellValue(row, ["DOB", "Date of Birth"]));
+          const course = String(getSpreadsheetCellValue(row, ["Course", "Specialization"]) || "").trim();
+          return {
+            rowNumber: index + 2,
+            name,
+            email,
+            phone,
+            dob,
+            course
+          };
+        })
+        .filter((row) => Object.values(row).some((value) => String(value || "").trim()));
+
+      if (parsedRows.length === 0) {
+        throw new Error("The uploaded file does not contain any student rows.");
+      }
+
+      setRegularBulkRows(parsedRows);
+      setRegularBulkStatus(`Loaded ${parsedRows.length} student rows from ${file.name}.`);
+    } catch (error) {
+      console.error("Regular bulk file parse error:", error);
+      setRegularBulkFileName("");
+      setRegularBulkRows([]);
+      setRegularBulkStatus(error.message || "Could not read the uploaded XLSX file.");
+    } finally {
+      if (event.target) {
+        event.target.value = "";
+      }
+    }
+  }, []);
+
+  const handleRegularBulkUpload = async (event) => {
+    event.preventDefault();
+    if (regularBulkSubmitting) return;
+
+    setRegularBulkStatus("");
+    setRegularBulkResult(null);
+
+    if (!regularBulkCollegeId) {
+      setRegularBulkStatus("Select the college for this bulk upload.");
+      return;
+    }
+    if (regularBulkRows.length === 0) {
+      setRegularBulkStatus("Upload a valid XLSX file before starting bulk registration.");
+      return;
+    }
+
+    try {
+      setRegularBulkSubmitting(true);
+      const response = await fetch("/admin/students/regular/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          collegeId: regularBulkCollegeId,
+          students: regularBulkRows
+        })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.success) {
+        throw new Error(data?.message || "Could not complete the bulk regular student registration.");
+      }
+
+      setRegularBulkResult(data);
+      setRegularBulkStatus(
+        `${Number(data.registeredCount || 0)} student${Number(data.registeredCount || 0) === 1 ? "" : "s"} registered successfully.` +
+        (Number(data.failedCount || 0) > 0 ? ` ${Number(data.failedCount || 0)} failed.` : "")
+      );
+      if (Number(data.registeredCount || 0) > 0) {
+        if (String(regularBulkCollegeId) !== String(collegeId || "")) {
+          setSelectedCollegeId(String(regularBulkCollegeId));
+          localStorage.setItem("collegeId", String(regularBulkCollegeId));
+        }
+        await loadStudents();
+      }
+    } catch (error) {
+      console.error("Regular bulk upload error:", error);
+      setRegularBulkStatus(error.message || "Could not complete the bulk upload.");
+    } finally {
+      setRegularBulkSubmitting(false);
     }
   };
 
@@ -1834,6 +2172,17 @@ function AdminDashboard() {
   };
 
   const recomputeWalkinResults = async () => {
+    if (walkinRecomputeLoading) return;
+    const confirmed = await openConfirmDialog({
+      title: "Recompute Walk-In Results",
+      message: "Are you sure you want to recompute the walk-in results?",
+      confirmLabel: "Recompute",
+      cancelLabel: "Cancel"
+    });
+    if (!confirmed) {
+      setWalkinRecomputeStatus("Walk-in result recompute cancelled.");
+      return;
+    }
     setWalkinRecomputeLoading(true);
     setWalkinRecomputeStatus("");
     try {
@@ -2017,6 +2366,12 @@ function AdminDashboard() {
     setActiveSection("walkin-results");
   };
 
+  const closeRegularReview = () => {
+    setRegularReviewError("");
+    setRegularReviewView("summary");
+    setActiveSection("regular-results");
+  };
+
   useEffect(() => {
     if (activeSection === "walkin-questions" && !walkinSheetLoading && !walkinSheetData) {
       fetchWalkinSheet();
@@ -2095,7 +2450,8 @@ function AdminDashboard() {
     { label: "Regular", count: regularStudentCount, tone: "regular" },
     { label: "Data Science", count: walkinStreamCounts["Data Science"], tone: "data-science" },
     { label: "Data Analytics", count: walkinStreamCounts["Data Analytics"], tone: "data-analytics" },
-    { label: "MERN", count: walkinStreamCounts.MERN, tone: "mern" }
+    { label: "MERN", count: walkinStreamCounts.MERN, tone: "mern" },
+    { label: "Agentic AI", count: walkinStreamCounts["Agentic AI"], tone: "agentic-ai" }
   ].map((entry) => ({
     ...entry,
     percent: toPercent(entry.count, studentCount || 1)
@@ -2163,6 +2519,24 @@ function AdminDashboard() {
     };
   });
   const codingLevelCards = normalizeCodingLevels(displayedCodingSummary);
+  const regularReviewResult = regularReviewData?.result || null;
+  const regularReviewMeta = regularReviewData?.review || null;
+  const regularReviewAnswers = regularReviewData?.questions || [];
+  const regularReviewStudentName =
+    regularReviewMeta?.student_name || regularReviewResult?.student_name || "Student";
+  const regularReviewExamNumber =
+    regularReviewMeta?.exam_id || regularReviewResult?.exam_id || "--";
+  const regularReviewSections = buildRegularReviewSectionMetrics(regularReviewAnswers);
+  const regularAptitudePercent = toPercent(
+    regularReviewSections.aptitude.correct,
+    regularReviewSections.aptitude.total
+  );
+  const regularTechnicalPercent = toPercent(
+    regularReviewSections.technical.correct,
+    regularReviewSections.technical.total
+  );
+  const regularFeedbackText = String(regularReviewMeta?.feedback_text || "").trim();
+  const regularFeedbackMode = String(regularReviewMeta?.feedback_submission_mode || "").trim().toUpperCase();
   const walkinResultsRows = useMemo(() => {
     const source = Array.isArray(walkinResults) ? walkinResults : [];
     const query = walkinResultsSearch.trim().toLowerCase();
@@ -2195,6 +2569,59 @@ function AdminDashboard() {
       return matchQuery && matchStream;
     }).sort((left, right) => Number(right.student_id || 0) - Number(left.student_id || 0));
   }, [walkinStudents, walkinStudentsSearch, walkinStudentsStreamFilter]);
+  const walkinStudentDateGroups = useMemo(
+    () => buildStudentDateGroups(filteredWalkinStudents),
+    [filteredWalkinStudents]
+  );
+  const handleDownloadWalkinResultsReport = useCallback(() => {
+    setWalkinResultsExportStatus("");
+    if (walkinResultsRows.length === 0) {
+      setWalkinResultsExportStatus("No walk-in results match the current filters.");
+      return;
+    }
+
+    const rows = walkinResultsRows.map((row) => {
+      const streamKey = String(row.stream || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      const codingDisabled = streamKey === "dataanalytics" || streamKey === "da" || streamKey === "agenticai" || streamKey === "aai";
+      const codingMarks =
+        Number(row.coding_easy_marks || 0) +
+        Number(row.coding_medium_marks || 0) +
+        Number(row.coding_hard_marks || 0);
+      return {
+        "Student ID": Number(row.student_id || 0) || "",
+        Name: String(row.name || "").trim(),
+        Stream: String(row.stream || "").trim(),
+        "Exam ID": Number(row.exam_id || 0) || "",
+        Email: String(row.email_id || "").trim(),
+        "Contact Number": String(row.contact_number || "").trim(),
+        Aptitude: Number(row.aptitude_marks || 0).toFixed(2),
+        Technical: Number(row.technical_marks || 0).toFixed(2),
+        Coding: codingDisabled ? "N/A" : codingMarks.toFixed(2),
+        "Total (50)": Number(row.total_marks || 0).toFixed(2)
+      };
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const columnWidths = [
+      { wch: 12 },
+      { wch: 28 },
+      { wch: 18 },
+      { wch: 10 },
+      { wch: 32 },
+      { wch: 18 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 12 }
+    ];
+    worksheet["!cols"] = columnWidths;
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Walk-In Results");
+    const timestamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
+    XLSX.writeFile(workbook, `walkin-results-report-${timestamp}.xlsx`);
+    setWalkinResultsExportStatus(`Downloaded ${rows.length} walk-in result records.`);
+  }, [walkinResultsRows]);
   const filteredRegularStudents = useMemo(() => {
     const query = regularStudentsSearch.trim().toLowerCase();
     return regularStudents.filter((student) => {
@@ -2208,6 +2635,10 @@ function AdminDashboard() {
       return matchQuery && matchCourse;
     });
   }, [regularStudents, regularStudentsSearch, regularStudentsCourseFilter]);
+  const regularStudentDateGroups = useMemo(
+    () => buildStudentDateGroups(filteredRegularStudents),
+    [filteredRegularStudents]
+  );
   const filteredRegularResults = useMemo(() => {
     const query = regularResultsSearch.trim().toLowerCase();
     return (recentResults || []).filter((row) => {
@@ -2485,7 +2916,7 @@ function AdminDashboard() {
               className={`nav-button ${activeSection === "create-exam" ? "active" : ""}`}
               onClick={() => handleSectionClick("create-exam")}
             >
-              Course Schedules
+              Schedule exams
             </button>
           )}
           <button
@@ -2497,7 +2928,7 @@ function AdminDashboard() {
           </button>
           <button
             type="button"
-            className={`nav-button ${activeSection === "regular-results" ? "active" : ""}`}
+            className={`nav-button ${activeSection === "regular-results" || activeSection === "regular-review" ? "active" : ""}`}
             onClick={() => handleSectionClick("regular-results")}
           >
             Regular Results
@@ -2587,14 +3018,23 @@ function AdminDashboard() {
                 <div className="dashboard-section admin-section" id="walkin-results">
                   <div className="walkin-results-head">
                     <h2>Walk-In Results</h2>
-                    <button
-                      type="button"
-                      className="small-outline-btn"
-                      onClick={recomputeWalkinResults}
-                      disabled={walkinRecomputeLoading}
-                    >
-                      {walkinRecomputeLoading ? "Recomputing..." : "Recompute Results"}
-                    </button>
+                    <div className="walkin-results-head-actions">
+                      <button
+                        type="button"
+                        className="small-outline-btn"
+                        onClick={handleDownloadWalkinResultsReport}
+                      >
+                        Download Report
+                      </button>
+                      <button
+                        type="button"
+                        className="small-outline-btn"
+                        onClick={recomputeWalkinResults}
+                        disabled={walkinRecomputeLoading}
+                      >
+                        {walkinRecomputeLoading ? "Recomputing..." : "Recompute Results"}
+                      </button>
+                    </div>
                   </div>
                   {walkinRecomputeStatus && <p className="section-placeholder">{walkinRecomputeStatus}</p>}
                   <div className="table-toolbar table-toolbar-upgraded">
@@ -2620,6 +3060,7 @@ function AdminDashboard() {
                       ))}
                     </select>
                   </div>
+                  {walkinResultsExportStatus && <p className="section-placeholder">{walkinResultsExportStatus}</p>}
                   {walkinResultsLoading && renderTableSkeleton(6)}
                   {walkinResultsError && <p className="auth-help">{walkinResultsError}</p>}
                   {walkinResults && walkinResultsRows.length === 0 && !walkinResultsLoading && !walkinResultsError && (
@@ -3180,6 +3621,149 @@ function AdminDashboard() {
                 </div>
               )}
 
+              {activeSection === "regular-review" && (
+                <div className="dashboard-section admin-section" id="regular-review">
+                  <div className="walkin-review-head">
+                    <div className="walkin-review-topline">
+                      <button type="button" className="small-outline-btn" onClick={closeRegularReview}>
+                        ← Back to Regular Results
+                      </button>
+                      <h2>
+                        {String(regularReviewStudentName || "Student").toUpperCase()} - EXAM {regularReviewExamNumber}
+                      </h2>
+                    </div>
+                    <div className="walkin-review-view-switch">
+                      <button
+                        type="button"
+                        className={`small-outline-btn ${regularReviewView === "summary" ? "active" : ""}`}
+                        onClick={() => setRegularReviewView("summary")}
+                      >
+                        Solutions Summary
+                      </button>
+                      <button
+                        type="button"
+                        className={`small-outline-btn ${regularReviewView === "marks" ? "active" : ""}`}
+                        onClick={() => setRegularReviewView("marks")}
+                      >
+                        Student Solution
+                      </button>
+                      <button
+                        type="button"
+                        className={`small-outline-btn ${regularReviewView === "feedback" ? "active" : ""}`}
+                        onClick={() => setRegularReviewView("feedback")}
+                      >
+                        Student Feedback
+                      </button>
+                    </div>
+                  </div>
+                  {regularReviewLoading && renderTableSkeleton(4)}
+                  {regularReviewError && <p className="auth-help">{regularReviewError}</p>}
+                  {!regularReviewLoading &&
+                    !regularReviewError &&
+                    regularReviewView === "summary" &&
+                    regularReviewAnswers.length === 0 && (
+                      <p className="section-placeholder">No summary found for this attempt.</p>
+                    )}
+                  {!regularReviewLoading &&
+                    !regularReviewError &&
+                    regularReviewView === "marks" &&
+                    regularReviewAnswers.length === 0 && (
+                      <p className="section-placeholder">No answers found for this attempt.</p>
+                    )}
+                  {!regularReviewLoading &&
+                    !regularReviewError &&
+                    regularReviewView === "feedback" &&
+                    !regularFeedbackText && (
+                      <p className="section-placeholder">No feedback submitted by the student.</p>
+                    )}
+                  {(regularReviewAnswers.length > 0 || regularFeedbackText) && (
+                    <div className="walkin-review-list">
+                      {regularReviewView === "summary" && regularReviewAnswers.length > 0 && (
+                        <div className="walkin-review-card walkin-review-summary">
+                          <p className="item-meta summary-title">
+                            Performance Summary of {regularReviewStudentName} ({regularReviewResult?.course || "Regular"})
+                          </p>
+                          <div className="summary-score-grid">
+                            <div className="summary-score-card summary-score-card-aptitude">
+                              <p className="summary-score-label">Aptitude</p>
+                              <div
+                                className="summary-donut"
+                                style={{ "--summary-percent": `${regularAptitudePercent}%` }}
+                              >
+                                <div className="summary-donut-center">
+                                  <p className="summary-donut-value">{Math.round(regularAptitudePercent)}%</p>
+                                  <p className="summary-donut-sub">score</p>
+                                </div>
+                              </div>
+                              <p className="summary-score-marks">
+                                {regularReviewSections.aptitude.correct.toFixed(2)} / {regularReviewSections.aptitude.total.toFixed(2)}
+                              </p>
+                              <p className="summary-score-accuracy">
+                                Attempted {regularReviewSections.aptitude.attempted} | Wrong {regularReviewSections.aptitude.wrong}
+                              </p>
+                            </div>
+                            <div className="summary-score-card summary-score-card-technical">
+                              <p className="summary-score-label">Technical</p>
+                              <div
+                                className="summary-donut"
+                                style={{ "--summary-percent": `${regularTechnicalPercent}%` }}
+                              >
+                                <div className="summary-donut-center">
+                                  <p className="summary-donut-value">{Math.round(regularTechnicalPercent)}%</p>
+                                  <p className="summary-donut-sub">score</p>
+                                </div>
+                              </div>
+                              <p className="summary-score-marks">
+                                {regularReviewSections.technical.correct.toFixed(2)} / {regularReviewSections.technical.total.toFixed(2)}
+                              </p>
+                              <p className="summary-score-accuracy">
+                                Attempted {regularReviewSections.technical.attempted} | Wrong {regularReviewSections.technical.wrong}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {regularReviewView === "marks" &&
+                        regularReviewAnswers.map((reviewQuestion, index) => {
+                          const sectionLabel = normalizeRegularReviewSection(reviewQuestion.section_name);
+                          const isCorrectAnswer =
+                            String(reviewQuestion.selected_option || "").trim().toUpperCase() ===
+                            String(reviewQuestion.correct_answer || "").trim().toUpperCase();
+                          const marksObtained = reviewQuestion.selected_option ? (isCorrectAnswer ? 1 : 0) : 0;
+                          return (
+                            <div className="walkin-review-card" key={`regular-review-${reviewQuestion.question_id}`}>
+                              <p className="item-meta">
+                                {sectionLabel === "APTITUDE" ? "Aptitude" : "Technical"} | Question {index + 1} | Marks: {marksObtained.toFixed(2)} / 1.00
+                              </p>
+                              <p className="item-text">{reviewQuestion.question_text || "Question text unavailable"}</p>
+                              {renderRegularReviewOptions(reviewQuestion)}
+                            </div>
+                          );
+                        })}
+                      {regularReviewView === "feedback" && regularFeedbackText && (
+                        <div className="walkin-review-card walkin-review-summary walkin-feedback-card">
+                          <div className="walkin-feedback-head">
+                            <p className="item-meta summary-title">Student Feedback</p>
+                            {regularFeedbackMode && (
+                              <span
+                                className={`walkin-feedback-mode-badge ${
+                                  regularFeedbackMode === "AUTO_SUBMIT" ? "auto" : "manual"
+                                }`}
+                              >
+                                {regularFeedbackMode === "AUTO_SUBMIT" ? "Auto Submit" : "Manual Submit"}
+                              </span>
+                            )}
+                          </div>
+                          <div className="walkin-feedback-response-block">
+                            <p className="item-answer item-answer-student">"{regularFeedbackText}"</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {activeSection === "walkin" && (
               <>
                 {(walkinTempLoading || walkinTempRequests.length > 0) && (
@@ -3445,60 +4029,87 @@ function AdminDashboard() {
                           <option value="ALL">All Streams</option>
                           {WALKIN_STREAMS.map((stream) => (
                             <option key={`ws-stream-${stream}`} value={stream}>
-                              {stream}
-                            </option>
-                          ))}
+                            {stream}
+                          </option>
+                        ))}
                         </select>
                       </div>
-                      <div className="table-shell">
-                      <table className="sticky-table">
-                        <thead>
-                        <tr>
-                          <th>S.No</th>
-                          <th>Name</th>
-                          <th>Email</th>
-                          <th>Specialization</th>
-                          <th>Status</th>
-                          <th>View Profile</th>
-                        </tr>
-                        </thead>
-                        <tbody>
-                          {filteredWalkinStudents.length === 0 && (
-                            <tr>
-                              <td colSpan="6" className="table-empty-cell">No walk-in students found</td>
-                            </tr>
-                          )}
-                          {filteredWalkinStudents.map((student, index) => {
-                            const statusLabel = String(student.student_status || "ACTIVE").trim().toUpperCase();
-                            return (
-                              <tr
-                                key={student.student_id}
-                                className={statusLabel === "INACTIVE" ? "student-row-inactive" : ""}
-                              >
-                                <td>{index + 1}</td>
-                                <td>{student.name}</td>
-                                <td>{student.email_id}</td>
-                                <td>{student.course}</td>
-                                <td>
-                                  <span className={"status-badge " + statusLabel.toLowerCase()}>
-                                    {statusLabel}
-                                  </span>
-                                </td>
-                                <td>
-                                  <button
-                                    type="button"
-                                    className="secondary-btn"
-                                    onClick={() => setSelectedWalkinProfile(student)}
-                                  >
-                                    View Profile
-                                  </button>
-                                </td>
+                      {filteredWalkinStudents.length === 0 ? (
+                        <div className="table-shell">
+                          <table className="sticky-table">
+                            <thead>
+                              <tr>
+                                <th>S.No</th>
+                                <th>Name</th>
+                                <th>Email</th>
+                                <th>Specialization</th>
+                                <th>Status</th>
+                                <th>View Profile</th>
                               </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                      </div>
+                            </thead>
+                            <tbody>
+                              <tr>
+                                <td colSpan="6" className="table-empty-cell">No walk-in students found</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : (
+                        <div className="student-date-groups">
+                          {walkinStudentDateGroups.map((group) => (
+                            <div className="student-date-group" key={`walkin-group-${group.dateKey}`}>
+                              <div className="student-date-heading">
+                                <span className="student-date-row-label">{formatRegistrationDateLabel(group.dateKey)}</span>
+                                <span className="student-date-row-count">{group.students.length} registered</span>
+                              </div>
+                              <div className="table-shell">
+                                <table className="sticky-table">
+                                  <thead>
+                                    <tr>
+                                      <th>S.No</th>
+                                      <th>Name</th>
+                                      <th>Email</th>
+                                      <th>Specialization</th>
+                                      <th>Status</th>
+                                      <th>View Profile</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {group.students.map((student, index) => {
+                                      const statusLabel = String(student.student_status || "ACTIVE").trim().toUpperCase();
+                                      return (
+                                        <tr
+                                          key={student.student_id}
+                                          className={statusLabel === "INACTIVE" ? "student-row-inactive" : ""}
+                                        >
+                                          <td>{index + 1}</td>
+                                          <td>{student.name}</td>
+                                          <td>{student.email_id}</td>
+                                          <td>{student.course}</td>
+                                          <td>
+                                            <span className={"status-badge " + statusLabel.toLowerCase()}>
+                                              {statusLabel}
+                                            </span>
+                                          </td>
+                                          <td>
+                                            <button
+                                              type="button"
+                                              className="secondary-btn"
+                                              onClick={() => setSelectedWalkinProfile(student)}
+                                            >
+                                              View Profile
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </>
                   )}
                   {selectedWalkinProfile && (
@@ -3743,7 +4354,10 @@ function AdminDashboard() {
                     <button
                       type="button"
                       className="small-outline-btn create-panel-toggle"
-                      onClick={() => setRegularCreateOpen((prev) => !prev)}
+                      onClick={() => {
+                        setRegularCreateOpen((prev) => !prev);
+                        setRegularCreateMode("manual");
+                      }}
                       aria-expanded={regularCreateOpen}
                       aria-controls="regular-create-form"
                     >
@@ -3751,122 +4365,277 @@ function AdminDashboard() {
                     </button>
                   </div>
                   {regularCreateOpen && (
-                  <form
-                    id="regular-create-form"
-                    className="form-row form-row-wide"
-                    autoComplete="off"
-                    onSubmit={handleRegularCreation}
-                  >
-                    <div className="form-field">
-                      <label>Full Name</label>
-                      <input
-                        type="text"
-                        name="regular_full_name_input"
-                        autoComplete="new-password"
-                        placeholder="Enter full name"
-                        value={regularForm.name}
-                        onChange={(event) => setRegularForm({ ...regularForm, name: event.target.value })}
-                      />
-                    </div>
-                    <div className="form-field">
-                      <label>College</label>
-                      <select
-                        value={regularForm.collegeId}
-                        onChange={(event) => setRegularForm({ ...regularForm, collegeId: event.target.value })}
-                        required
+                  <>
+                  <div className="regular-create-mode-switch">
+                    <button
+                      type="button"
+                      className={`regular-create-mode-btn ${regularCreateMode === "manual" ? "active" : ""}`}
+                      onClick={() => setRegularCreateMode("manual")}
+                    >
+                      Manual Registration
+                    </button>
+                    <button
+                      type="button"
+                      className={`regular-create-mode-btn ${regularCreateMode === "bulk" ? "active" : ""}`}
+                      onClick={() => setRegularCreateMode("bulk")}
+                    >
+                      Bulk Registration
+                    </button>
+                  </div>
+
+                  {regularCreateMode === "manual" && (
+                    <div className="regular-create-mode-panel">
+                      <div className="regular-create-mode-head">
+                        <h3>Manual Registration</h3>
+                        <p>Create one regular student account at a time.</p>
+                      </div>
+                      <form
+                        id="regular-create-form"
+                        className="form-row form-row-wide"
+                        autoComplete="off"
+                        onSubmit={handleRegularCreation}
                       >
-                        <option value="">Select college</option>
-                        {collegeOptionsSortedByName.map((college) => (
-                          <option key={college.college_id} value={college.college_id}>
-                            {college.college_name}
-                          </option>
-                        ))}
-                      </select>
-                      {collegeError && (
-                        <p className="auth-help" style={{ color: "#f8c7c7" }}>
-                          {collegeError}
+                        <div className="form-field">
+                          <label>Full Name</label>
+                          <input
+                            type="text"
+                            name="regular_full_name_input"
+                            autoComplete="new-password"
+                            placeholder="Enter full name"
+                            value={regularForm.name}
+                            onChange={(event) => setRegularForm({ ...regularForm, name: event.target.value })}
+                          />
+                        </div>
+                        <div className="form-field">
+                          <label>College</label>
+                          <select
+                            value={regularForm.collegeId}
+                            onChange={(event) => setRegularForm({ ...regularForm, collegeId: event.target.value })}
+                            required
+                          >
+                            <option value="">Select college</option>
+                            {collegeOptionsSortedByName.map((college) => (
+                              <option key={college.college_id} value={college.college_id}>
+                                {college.college_name}
+                              </option>
+                            ))}
+                          </select>
+                          {collegeError && (
+                            <p className="auth-help" style={{ color: "#f8c7c7" }}>
+                              {collegeError}
+                            </p>
+                          )}
+                        </div>
+                        <div className="form-field">
+                          <label>Email</label>
+                          <input
+                            type="email"
+                            name="regular_email_input"
+                            placeholder="Enter email"
+                            autoComplete="new-password"
+                            value={regularForm.email}
+                            onChange={(event) => setRegularForm({ ...regularForm, email: event.target.value })}
+                          />
+                        </div>
+                        <div className="form-field">
+                          <label>Phone Number</label>
+                          <input
+                            type="text"
+                            name="regular_phone_input"
+                            autoComplete="new-password"
+                            placeholder="Enter contact number"
+                            value={regularForm.phone}
+                            onChange={(event) => setRegularForm({ ...regularForm, phone: event.target.value })}
+                          />
+                        </div>
+                        <div className="form-field">
+                          <label>Date of Birth</label>
+                          <input
+                            type="date"
+                            name="regular_dob_input"
+                            autoComplete="off"
+                            value={regularForm.dob}
+                            onChange={(event) => setRegularForm({ ...regularForm, dob: event.target.value })}
+                          />
+                        </div>
+                        <div className="form-field">
+                          <label>Background</label>
+                          <select
+                            value={regularForm.background}
+                            onChange={(event) =>
+                              setRegularForm({
+                                ...regularForm,
+                                background: event.target.value,
+                                course: ""
+                              })
+                            }
+                          >
+                            <option value="">Select Background</option>
+                            <option value="TECH">TECH</option>
+                            <option value="NON_TECH">NON_TECH</option>
+                          </select>
+                        </div>
+                        <div className="form-field">
+                          <label>Course</label>
+                          <select
+                            value={regularForm.course}
+                            onChange={(event) => setRegularForm({ ...regularForm, course: event.target.value })}
+                            disabled={!regularForm.background}
+                          >
+                            <option value="">{regularForm.background ? "Select Course" : "Select Background First"}</option>
+                            {getRegularCoursesByBackground(regularForm.background).map((course) => (
+                              <option key={course} value={course}>
+                                {course}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="form-field">
+                          <label>Password</label>
+                          <input
+                            type="password"
+                            name="regular_password_input"
+                            placeholder="Set password"
+                            autoComplete="new-password"
+                            value={regularForm.password}
+                            onChange={(event) => setRegularForm({ ...regularForm, password: event.target.value })}
+                          />
+                        </div>
+                        <button type="submit" disabled={regularCreateSubmitting}>
+                          {regularCreateSubmitting ? "Creating..." : "Create Regular Account"}
+                        </button>
+                      </form>
+                    </div>
+                  )}
+
+                  {regularCreateMode === "bulk" && (
+                    <div className="regular-create-mode-panel regular-bulk-panel">
+                      <div className="regular-bulk-head">
+                        <div>
+                          <h3>Bulk Registration</h3>
+                          <p>
+                            Use one XLSX file per college. Select the college here, download the template,
+                            fill the required student columns, and upload the file.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="small-outline-btn"
+                          onClick={handleDownloadRegularBulkTemplate}
+                        >
+                          Download Template
+                        </button>
+                      </div>
+
+                      <form className="regular-bulk-form" onSubmit={handleRegularBulkUpload}>
+                        <div className="form-field">
+                          <label>College for This Upload</label>
+                          <select
+                            value={regularBulkCollegeId}
+                            onChange={(event) => setRegularBulkCollegeId(event.target.value)}
+                            required
+                          >
+                            <option value="">Select college</option>
+                            {collegeOptionsSortedByName.map((college) => (
+                              <option key={`regular-bulk-college-${college.college_id}`} value={college.college_id}>
+                                {college.college_name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="form-field">
+                          <label>XLSX File</label>
+                          <input
+                            ref={regularBulkFileInputRef}
+                            type="file"
+                            accept=".xlsx,.xls"
+                            onChange={handleRegularBulkFileChange}
+                          />
+                        </div>
+
+                        <div className="regular-bulk-actions">
+                          <button
+                            type="button"
+                            className="small-outline-btn"
+                            onClick={clearRegularBulkUpload}
+                            disabled={regularBulkSubmitting}
+                          >
+                            Clear File
+                          </button>
+                          <button type="submit" disabled={regularBulkSubmitting}>
+                            {regularBulkSubmitting ? "Registering..." : "Start Bulk Registration"}
+                          </button>
+                        </div>
+                      </form>
+
+                      <div className="regular-bulk-meta">
+                        <span>Required columns: {REGULAR_BULK_TEMPLATE_COLUMNS.join(", ")}</span>
+                        <span>Selected file: {regularBulkFileName || "--"}</span>
+                        <span>Loaded rows: {regularBulkRows.length}</span>
+                      </div>
+
+                      {regularBulkStatus && (
+                        <p className="auth-help" style={{ marginTop: 10 }}>
+                          {regularBulkStatus}
                         </p>
                       )}
+
+                      {regularBulkResult && (
+                        <div className="regular-bulk-result">
+                          <div className="regular-bulk-summary-grid">
+                            <div className="regular-bulk-summary-card">
+                              <span>College</span>
+                              <strong>{regularBulkResult.collegeName || "--"}</strong>
+                            </div>
+                            <div className="regular-bulk-summary-card">
+                              <span>Registered</span>
+                              <strong>{Number(regularBulkResult.registeredCount || 0)}</strong>
+                            </div>
+                            <div className="regular-bulk-summary-card">
+                              <span>Failed</span>
+                              <strong>{Number(regularBulkResult.failedCount || 0)}</strong>
+                            </div>
+                          </div>
+
+                          {Array.isArray(regularBulkResult.failedStudents) && regularBulkResult.failedStudents.length > 0 && (
+                            <div className="regular-bulk-failure-shell">
+                              <h4>Failed Registrations</h4>
+                              <div className="table-shell">
+                                <table className="sticky-table regular-bulk-failure-table">
+                                  <thead>
+                                    <tr>
+                                      <th>Row</th>
+                                      <th>Name</th>
+                                      <th>Email</th>
+                                      <th>Phone</th>
+                                      <th>DOB</th>
+                                      <th>Course</th>
+                                      <th>Issue</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {regularBulkResult.failedStudents.map((student) => (
+                                      <tr key={`regular-bulk-failure-${student.rowNumber}-${student.email || student.name}`}>
+                                        <td>{student.rowNumber || "--"}</td>
+                                        <td>{student.name || "--"}</td>
+                                        <td>{student.email || "--"}</td>
+                                        <td>{student.phone || "--"}</td>
+                                        <td>{student.dob || "--"}</td>
+                                        <td>{student.course || "--"}</td>
+                                        <td>{student.reason || "Registration failed"}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                    <div className="form-field">
-                      <label>Email</label>
-                      <input
-                        type="email"
-                        name="regular_email_input"
-                        placeholder="Enter email"
-                        autoComplete="new-password"
-                        value={regularForm.email}
-                        onChange={(event) => setRegularForm({ ...regularForm, email: event.target.value })}
-                      />
-                    </div>
-                    <div className="form-field">
-                      <label>Phone Number</label>
-                      <input
-                        type="text"
-                        name="regular_phone_input"
-                        autoComplete="new-password"
-                        placeholder="Enter contact number"
-                        value={regularForm.phone}
-                        onChange={(event) => setRegularForm({ ...regularForm, phone: event.target.value })}
-                      />
-                    </div>
-                    <div className="form-field">
-                      <label>Date of Birth</label>
-                      <input
-                        type="date"
-                        name="regular_dob_input"
-                        autoComplete="off"
-                        value={regularForm.dob}
-                        onChange={(event) => setRegularForm({ ...regularForm, dob: event.target.value })}
-                      />
-                    </div>
-                    <div className="form-field">
-                      <label>Background</label>
-                      <select
-                        value={regularForm.background}
-                        onChange={(event) =>
-                          setRegularForm({
-                            ...regularForm,
-                            background: event.target.value,
-                            course: ""
-                          })
-                        }
-                      >
-                        <option value="">Select Background</option>
-                        <option value="TECH">TECH</option>
-                        <option value="NON_TECH">NON_TECH</option>
-                      </select>
-                    </div>
-                    <div className="form-field">
-                      <label>Course</label>
-                      <select
-                        value={regularForm.course}
-                        onChange={(event) => setRegularForm({ ...regularForm, course: event.target.value })}
-                        disabled={!regularForm.background}
-                      >
-                        <option value="">{regularForm.background ? "Select Course" : "Select Background First"}</option>
-                        {getRegularCoursesByBackground(regularForm.background).map((course) => (
-                          <option key={course} value={course}>
-                            {course}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="form-field">
-                      <label>Password</label>
-                      <input
-                        type="password"
-                        name="regular_password_input"
-                        placeholder="Set password"
-                        autoComplete="new-password"
-                        value={regularForm.password}
-                        onChange={(event) => setRegularForm({ ...regularForm, password: event.target.value })}
-                      />
-                    </div>
-                    <button type="submit" disabled={regularCreateSubmitting}>
-                      {regularCreateSubmitting ? "Creating..." : "Create Regular Account"}
-                    </button>
-                  </form>
+                  )}
+                  </>
                   )}
                   {regularStatus && (
                     <p className="auth-help" style={{ marginTop: 10 }}>
@@ -3919,59 +4688,87 @@ function AdminDashboard() {
                       ))}
                     </select>
                   </div>
-                  <div className="table-shell">
-                  <table className="sticky-table">
-                    <thead>
-                      <tr>
-                        <th>S.No</th>
-                        <th>Name</th>
-                        <th>Email</th>
-                        <th>Specialization</th>
-                        <th>Background</th>
-                        <th>Status</th>
-                        <th>View Profile</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRegularStudents.length === 0 && (
-                        <tr>
-                          <td colSpan="7" className="table-empty-cell">No regular students found</td>
-                        </tr>
-                      )}
-                      {filteredRegularStudents.map((student, index) => {
-                        const statusLabel = String(student.student_status || "ACTIVE").trim().toUpperCase();
-                        return (
-                          <tr
-                            key={student.student_id}
-                            className={statusLabel === "INACTIVE" ? "student-row-inactive" : ""}
-                          >
-                            <td>{index + 1}</td>
-                            <td>{student.name}</td>
-                            <td>{student.email_id}</td>
-                            <td>{student.course}</td>
-                            <td>{String(student.background_type || "").trim().toUpperCase() || getRegularBackgroundType(student.course) || "--"}</td>
-                            <td>
-                              <span className={"status-badge " + statusLabel.toLowerCase()}>
-                                {statusLabel}
-                              </span>
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="secondary-btn"
-                                onClick={() => {
-                                  setSelectedRegularProfile(student);
-                                }}
-                              >
-                                View Profile
-                              </button>
-                            </td>
+                  {filteredRegularStudents.length === 0 ? (
+                    <div className="table-shell">
+                      <table className="sticky-table">
+                        <thead>
+                          <tr>
+                            <th>S.No</th>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Specialization</th>
+                            <th>Background</th>
+                            <th>Status</th>
+                            <th>View Profile</th>
                           </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                  </div>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td colSpan="7" className="table-empty-cell">No regular students found</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <div className="student-date-groups">
+                      {regularStudentDateGroups.map((group) => (
+                        <div className="student-date-group" key={`regular-group-${group.dateKey}`}>
+                          <div className="student-date-heading">
+                            <span className="student-date-row-label">{formatRegistrationDateLabel(group.dateKey)}</span>
+                            <span className="student-date-row-count">{group.students.length} registered</span>
+                          </div>
+                          <div className="table-shell">
+                            <table className="sticky-table">
+                              <thead>
+                                <tr>
+                                  <th>S.No</th>
+                                  <th>Name</th>
+                                  <th>Email</th>
+                                  <th>Specialization</th>
+                                  <th>Background</th>
+                                  <th>Status</th>
+                                  <th>View Profile</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {group.students.map((student, index) => {
+                                  const statusLabel = String(student.student_status || "ACTIVE").trim().toUpperCase();
+                                  return (
+                                    <tr
+                                      key={student.student_id}
+                                      className={statusLabel === "INACTIVE" ? "student-row-inactive" : ""}
+                                    >
+                                      <td>{index + 1}</td>
+                                      <td>{student.name}</td>
+                                      <td>{student.email_id}</td>
+                                      <td>{student.course}</td>
+                                      <td>{String(student.background_type || "").trim().toUpperCase() || getRegularBackgroundType(student.course) || "--"}</td>
+                                      <td>
+                                        <span className={"status-badge " + statusLabel.toLowerCase()}>
+                                          {statusLabel}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <button
+                                          type="button"
+                                          className="secondary-btn"
+                                          onClick={() => {
+                                            setSelectedRegularProfile(student);
+                                          }}
+                                        >
+                                          View Profile
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                     </>
                   )}
                   {selectedRegularProfile && (
@@ -3983,6 +4780,7 @@ function AdminDashboard() {
                         <div className="profile-item"><span className="profile-label">Email</span><span className="profile-value">{selectedRegularProfile.email_id || "--"}</span></div>
                         <div className="profile-item"><span className="profile-label">Contact</span><span className="profile-value">{selectedRegularProfile.contact_number || "--"}</span></div>
                         <div className="profile-item"><span className="profile-label">DOB</span><span className="profile-value">{selectedRegularProfile.dob ? new Date(selectedRegularProfile.dob).toLocaleDateString() : "--"}</span></div>
+                        <div className="profile-item"><span className="profile-label">Registered On</span><span className="profile-value">{selectedRegularProfile.created_at ? formatIST24(selectedRegularProfile.created_at) : "--"}</span></div>
                         <div className="profile-item"><span className="profile-label">Specialization</span><span className="profile-value">{selectedRegularProfile.course || "--"}</span></div>
                         <div className="profile-item"><span className="profile-label">Background</span><span className="profile-value">{String(selectedRegularProfile.background_type || "").trim().toUpperCase() || getRegularBackgroundType(selectedRegularProfile.course) || "--"}</span></div>
                         <div className="profile-item"><span className="profile-label">Status</span><span className="profile-value"><span className={"status-badge " + String(selectedRegularProfile.student_status || "ACTIVE").trim().toLowerCase()}>{String(selectedRegularProfile.student_status || "ACTIVE").trim().toUpperCase()}</span></span></div>
@@ -4156,6 +4954,10 @@ function AdminDashboard() {
                             />
                           ) : (selectedWalkinProfile.dob ? new Date(selectedWalkinProfile.dob).toLocaleDateString() : "--")}
                         </span>
+                      </div>
+                      <div className="profile-item">
+                        <span className="profile-label">Registered On</span>
+                        <span className="profile-value">{selectedWalkinProfile.created_at ? formatIST24(selectedWalkinProfile.created_at) : "--"}</span>
                       </div>
                       <div className="profile-item">
                         <span className="profile-label">Stream</span>

@@ -293,7 +293,6 @@ export default function Exam() {
 
   const currentQuestion = questionBank[currentIndex];
   const questionType = (currentQuestion?.question_type || "MCQ").toLowerCase();
-  const currentQuestionMarks = Number(currentQuestion?.marks ?? 1);
   const currentAnswer = readAnswer(currentQuestion, codingLanguage);
   const currentDescriptiveWordLimit =
     questionType === "descriptive" ? getDescriptiveWordLimit(currentQuestion?.question_id) : null;
@@ -462,12 +461,6 @@ export default function Exam() {
     const passed = Math.max(0, Math.min(Number(summary.passed || 0), total));
     return { passed, total };
   }, [currentQuestion, questionType, codingRunSummary, codingTestcases.length]);
-
-  const codingProjectedMarks = useMemo(() => {
-    if (questionType !== "coding") return 0;
-    if (currentCodingRun.total <= 0) return 0;
-    return Number(((currentCodingRun.passed / currentCodingRun.total) * currentQuestionMarks).toFixed(2));
-  }, [questionType, currentCodingRun, currentQuestionMarks]);
 
   const formatTestValue = useCallback((value) => {
     if (value === null || value === undefined) {
@@ -1538,12 +1531,10 @@ export default function Exam() {
   };
 
   const renderQuestionPrompt = () => {
-    const marks = currentQuestion?.marks ?? 1;
     return (
       <div className="question-prompt">
         <div className="question-prompt-header">
           <span className="question-label">Q{currentIndex + 1}</span>
-          <span className="question-marks">Marks: {marks}</span>
         </div>
         <p className="question-text">{currentQuestion.question_text}</p>
         {questionType === "descriptive" && currentDescriptiveWordLimit && (
@@ -2109,26 +2100,6 @@ export default function Exam() {
             <div className="question-card surface">
               {!loading && currentQuestion && (
                 <>
-                  {isTechnicalSection(currentSection) && currentTechnicalStream && (
-                    <div className="technical-subsection-banner">
-                      <div className="technical-subsection-pill">
-                        <span>Stream</span>
-                        <strong>{currentTechnicalStream}</strong>
-                      </div>
-                      {technicalStreams.length > 0 && (
-                        <div className="technical-streams-row">
-                          {technicalStreams.map((stream) => (
-                            <span
-                              key={stream}
-                              className={`technical-stream-pill${stream === currentTechnicalStream ? " active" : ""}`}
-                            >
-                              {stream}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
                   {questionType === "coding" ? (
                     <div className="coding-layout">
                       <div className="coding-description">
@@ -2163,10 +2134,6 @@ export default function Exam() {
                             <div className="coding-run-stat">
                               <span>Last run</span>
                               <strong>{currentCodingRun.passed}/{currentCodingRun.total || codingTestcases.length || 0}</strong>
-                            </div>
-                            <div className="coding-run-stat">
-                              <span>Marks if submitted now</span>
-                              <strong>{codingProjectedMarks.toFixed(2)} / {currentQuestionMarks.toFixed(2)}</strong>
                             </div>
                           </div>
                           {renderTestOutcomeBoxes()}

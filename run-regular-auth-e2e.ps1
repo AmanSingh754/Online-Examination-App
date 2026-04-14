@@ -15,7 +15,7 @@ function Wait-Healthy {
   for ($i = 0; $i -lt $Retries; $i++) {
     Start-Sleep -Seconds 2
     try {
-      $resp = Invoke-RestMethod -UseBasicParsing http://127.0.0.1:5000/healthz
+      $resp = Invoke-RestMethod -UseBasicParsing http://127.0.0.1:5000/healthz -TimeoutSec 10
       if ($resp.ok -eq $true) { return $resp }
     } catch {}
   }
@@ -45,6 +45,7 @@ function Invoke-NodeJson {
 }
 
 try {
+  Write-Host "[regular-smoke] waiting for backend health"
   $null = Wait-Healthy
 
   $setupCode = @'
@@ -71,10 +72,8 @@ const { Client } = require("pg");
     const adminPassword = `Admin!${stamp}`;
     const regularAEmail = `smoke.regular.a.${stamp}@example.com`;
     const regularBEmail = `smoke.regular.b.${stamp}@example.com`;
-    const walkinEmail = `smoke.walkin.${stamp}@example.com`;
     const regularAPassword = `RegA!${stamp}`;
     const regularBPassword = `RegB!${stamp}`;
-    const walkinPassword = `Walk!${stamp}`;
     const nextAdminIdRow = await client.query(`SELECT COALESCE(MAX(admin_id::bigint), 0) + 1 AS next_id FROM admins`);
     const nextAdminId = Number(nextAdminIdRow.rows[0].next_id || 1);
     const admin = await client.query(`INSERT INTO admins (admin_id, email_id, password) VALUES ($1, $2, $3) RETURNING admin_id`, [nextAdminId, adminEmail, adminPassword]);
@@ -88,22 +87,37 @@ const { Client } = require("pg");
       VALUES ($1, $2, $3, $4, $5, $6, $7, 'REGULAR', 'ACTIVE', NULL)
       RETURNING student_id
     `, [`Smoke Regular B ${stamp}`, regularBEmail, '9876502020', '2000-02-15', 'BCom', 'NON_TECH', Number(colleges.rows[1].college_id)]);
-    const walkin = await client.query(`
-      INSERT INTO students (name, email_id, contact_number, dob, course, college_id, student_type, status, bde_name)
-      VALUES ($1, $2, $3, $4, $5, $6, 'WALK_IN', 'ACTIVE', $7)
-      RETURNING student_id
-    `, [`Smoke Walkin ${stamp}`, walkinEmail, '9876503030', '2000-03-15', 'Data Science', Number(colleges.rows[0].college_id), 'smoke-test']);
     await client.query(`INSERT INTO student_credentials (student_id, password) VALUES ($1, $2)`, [Number(regularA.rows[0].student_id), regularAPassword]);
     await client.query(`INSERT INTO student_credentials (student_id, password) VALUES ($1, $2)`, [Number(regularB.rows[0].student_id), regularBPassword]);
-    await client.query(`INSERT INTO student_credentials (student_id, password) VALUES ($1, $2)`, [Number(walkin.rows[0].student_id), walkinPassword]);
+    const insertedTechQuestionIds = [];
+    for (let i = 1; i <= 30; i += 1) {
+      const techResult = await client.query(
+        `INSERT INTO regular_technical_questions
+         (question_text, option_a, option_b, option_c, option_d, correct_answer, background_type, section_name, question_type, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, 'TECH', 'TECHNICAL_ADVANCED', 'MCQ', TRUE)
+         RETURNING question_id`,
+        [`Smoke TECH question ${stamp}-${i}`, 'A', 'B', 'C', 'D', 'A']
+      );
+      insertedTechQuestionIds.push(Number(techResult.rows[0].question_id));
+
+      const nonTechResult = await client.query(
+        `INSERT INTO regular_technical_questions
+         (question_text, option_a, option_b, option_c, option_d, correct_answer, background_type, section_name, question_type, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, 'NON_TECH', 'TECHNICAL_BASIC', 'MCQ', TRUE)
+         RETURNING question_id`,
+        [`Smoke NON_TECH question ${stamp}-${i}`, 'A', 'B', 'C', 'D', 'A']
+      );
+      insertedTechQuestionIds.push(Number(nonTechResult.rows[0].question_id));
+    }
+
     const state = {
       admin: { adminId: Number(admin.rows[0].admin_id), email: adminEmail, password: adminPassword },
       regularA: { studentId: Number(regularA.rows[0].student_id), email: regularAEmail, password: regularAPassword, collegeId: String(colleges.rows[0].college_id) },
       regularB: { studentId: Number(regularB.rows[0].student_id), email: regularBEmail, password: regularBPassword, collegeId: String(colleges.rows[1].college_id) },
-      walkin: { studentId: Number(walkin.rows[0].student_id), email: walkinEmail, password: walkinPassword },
+      seededTechnicalQuestionIds: insertedTechQuestionIds,
       cleanup: { examId: null }
     };
-    fs.writeFileSync(path.resolve(process.cwd(), "smoke-auth-state.json"), JSON.stringify(state, null, 2));
+    fs.writeFileSync(path.resolve(process.cwd(), "smoke-regular-state.json"), JSON.stringify(state, null, 2));
     console.log(JSON.stringify(state));
   } finally {
     await client.end();
@@ -114,59 +128,58 @@ const { Client } = require("pg");
   $state = Invoke-NodeJson -Code $setupCode -WorkingDirectory (Join-Path $PWD "Backend")
 
   $base = "http://127.0.0.1:5000"
+  Write-Host "[regular-smoke] admin login"
   $adminSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-  $adminLogin = Invoke-RestMethod -Uri "$base/admin/login" -Method Post -WebSession $adminSession -ContentType "application/json" -Body (@{ email = $state.admin.email; password = $state.admin.password } | ConvertTo-Json)
+  $adminLogin = Invoke-RestMethod -Uri "$base/admin/login" -Method Post -WebSession $adminSession -ContentType "application/json" -Body (@{ email = $state.admin.email; password = $state.admin.password } | ConvertTo-Json) -TimeoutSec 30
   if (-not $adminLogin.success) { throw "Admin login failed" }
 
+  Write-Host "[regular-smoke] scheduling exam"
   $nowIst = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId((Get-Date).AddMinutes(-9), "India Standard Time")
-  $schedule = Invoke-RestMethod -Uri "$base/admin/exam" -Method Post -WebSession $adminSession -ContentType "application/json" -Body (@{ collegeId = $state.regularA.collegeId; startDate = $nowIst.ToString("yyyy-MM-dd"); startTime = $nowIst.ToString("HH:mm") } | ConvertTo-Json)
+  $schedule = Invoke-RestMethod -Uri "$base/admin/exam" -Method Post -WebSession $adminSession -ContentType "application/json" -Body (@{ collegeId = $state.regularA.collegeId; startDate = $nowIst.ToString("yyyy-MM-dd"); startTime = $nowIst.ToString("HH:mm") } | ConvertTo-Json) -TimeoutSec 30
   if (-not $schedule.success) { throw "Schedule failed" }
 
   $state.cleanup.examId = [int]$schedule.examId
-  $state | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $PWD "Backend\\smoke-auth-state.json")
+  $state | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $PWD "Backend\\smoke-regular-state.json")
 
-  $adminExams = Invoke-RestMethod -Uri "$base/admin/exams" -Method Get -WebSession $adminSession
+  Write-Host "[regular-smoke] verifying admin exam list"
+  $adminExams = Invoke-RestMethod -Uri "$base/admin/exams" -Method Get -WebSession $adminSession -TimeoutSec 30
   $scheduledExam = $adminExams | Where-Object { $_.exam_id -eq $schedule.examId } | Select-Object -First 1
   if (-not $scheduledExam) { throw "Scheduled exam missing in admin list" }
   if ("$($scheduledExam.college_id)" -ne "$($state.regularA.collegeId)") { throw "Scheduled exam college mismatch" }
 
+  Write-Host "[regular-smoke] regular student login"
   $regSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-  $regLogin = Invoke-RestMethod -Uri "$base/student/login" -Method Post -WebSession $regSession -ContentType "application/json" -Body (@{ email = $state.regularA.email; password = $state.regularA.password } | ConvertTo-Json)
+  $regLogin = Invoke-RestMethod -Uri "$base/student/login" -Method Post -WebSession $regSession -ContentType "application/json" -Body (@{ email = $state.regularA.email; password = $state.regularA.password } | ConvertTo-Json) -TimeoutSec 30
   if (-not $regLogin.success) { throw "Regular A login failed" }
-  $regExams = Invoke-RestMethod -Uri "$base/student/exams/$($regLogin.studentId)" -Method Get -WebSession $regSession
+
+  Write-Host "[regular-smoke] checking regular student visibility"
+  $regExams = Invoke-RestMethod -Uri "$base/student/exams/$($regLogin.studentId)" -Method Get -WebSession $regSession -TimeoutSec 30
   if (-not ($regExams | Where-Object { $_.exam_id -eq $schedule.examId })) { throw "Matching college student cannot see scheduled exam" }
-  $regStart = Invoke-RestMethod -Uri "$base/exam/regular/start" -Method Post -WebSession $regSession -ContentType "application/json" -Body (@{ studentId = $regLogin.studentId; examId = $schedule.examId } | ConvertTo-Json)
+
+  Write-Host "[regular-smoke] starting regular exam"
+  $regStart = Invoke-RestMethod -Uri "$base/exam/regular/start" -Method Post -WebSession $regSession -ContentType "application/json" -Body (@{ studentId = $regLogin.studentId; examId = $schedule.examId } | ConvertTo-Json) -TimeoutSec 30
   if (-not $regStart.success) { throw "Regular start failed" }
+
+  Write-Host "[regular-smoke] waiting for question unlock"
   Start-Sleep -Seconds 65
-  $regQuestions = Invoke-RestMethod -Uri "$base/exam/regular/questions/$($schedule.examId)" -Method Get -WebSession $regSession
+
+  Write-Host "[regular-smoke] fetching regular questions"
+  $regQuestions = Invoke-RestMethod -Uri "$base/exam/regular/questions/$($schedule.examId)" -Method Get -WebSession $regSession -TimeoutSec 30
   if (-not $regQuestions -or $regQuestions.Count -le 0) { throw "Regular questions missing" }
 
+  Write-Host "[regular-smoke] comparison student login"
   $otherSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-  $otherLogin = Invoke-RestMethod -Uri "$base/student/login" -Method Post -WebSession $otherSession -ContentType "application/json" -Body (@{ email = $state.regularB.email; password = $state.regularB.password } | ConvertTo-Json)
+  $otherLogin = Invoke-RestMethod -Uri "$base/student/login" -Method Post -WebSession $otherSession -ContentType "application/json" -Body (@{ email = $state.regularB.email; password = $state.regularB.password } | ConvertTo-Json) -TimeoutSec 30
   if (-not $otherLogin.success) { throw "Regular B login failed" }
-  $otherExams = Invoke-RestMethod -Uri "$base/student/exams/$($otherLogin.studentId)" -Method Get -WebSession $otherSession
-  if ($otherExams | Where-Object { $_.exam_id -eq $schedule.examId }) { throw "Scheduled exam leaked to student from other college" }
 
-  $walkSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-  $walkLogin = Invoke-RestMethod -Uri "$base/student/login" -Method Post -WebSession $walkSession -ContentType "application/json" -Body (@{ email = $state.walkin.email; password = $state.walkin.password } | ConvertTo-Json)
-  if (-not $walkLogin.success) { throw "Walk-in login failed" }
-  $walkExams = Invoke-RestMethod -Uri "$base/student/exams/$($walkLogin.studentId)" -Method Get -WebSession $walkSession
-  $walkExam = $walkExams | Select-Object -First 1
-  if (-not $walkExam) { throw "Walk-in exam missing" }
-  $walkStart = Invoke-RestMethod -Uri "$base/exam/start" -Method Post -WebSession $walkSession -ContentType "application/json" -Body (@{ studentId = $walkLogin.studentId; examId = $walkExam.exam_id } | ConvertTo-Json)
-  if (-not $walkStart.success) { throw "Walk-in start failed" }
-  $walkQuestions = Invoke-RestMethod -Uri "$base/exam/regular_exam_questions/$($walkExam.exam_id)" -Method Get -WebSession $walkSession
-  if (-not $walkQuestions -or $walkQuestions.Count -le 0) { throw "Walk-in questions missing" }
-  $walkDuration = Invoke-RestMethod -Uri "$base/exam/duration/$($walkExam.exam_id)" -Method Get -WebSession $walkSession
-  if (-not $walkDuration.success -or [int]$walkDuration.durationMinutes -le 0) { throw "Walk-in duration missing" }
+  Write-Host "[regular-smoke] checking other student isolation"
+  $otherExams = Invoke-RestMethod -Uri "$base/student/exams/$($otherLogin.studentId)" -Method Get -WebSession $otherSession -TimeoutSec 30
+  if ($otherExams | Where-Object { $_.exam_id -eq $schedule.examId }) { throw "Scheduled exam leaked to student from other college" }
 
   [pscustomobject]@{
     success = $true
     regular_exam_id = [int]$schedule.examId
     regular_question_count = [int]$regQuestions.Count
-    walkin_exam_id = [int]$walkExam.exam_id
-    walkin_question_count = [int]$walkQuestions.Count
-    walkin_duration = [int]$walkDuration.durationMinutes
   } | ConvertTo-Json -Depth 5
 }
 finally {
@@ -177,14 +190,14 @@ const path = require("path");
 require("dotenv").config({ path: path.resolve(process.cwd(), ".env") });
 const { Client } = require("pg");
 (async () => {
-  const statePath = path.resolve(process.cwd(), "smoke-auth-state.json");
+  const statePath = path.resolve(process.cwd(), "smoke-regular-state.json");
   if (!fs.existsSync(statePath)) return;
   const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
   const client = new Client({ host: process.env.PG_HOST, port: Number(process.env.PG_PORT), user: process.env.PG_USER, password: process.env.PG_PASSWORD, database: process.env.PG_DATABASE, ssl: false });
   await client.connect();
   try {
     const examId = Number(state?.cleanup?.examId || 0) || null;
-    const studentIds = [state?.regularA?.studentId, state?.regularB?.studentId, state?.walkin?.studentId].map((v) => Number(v || 0)).filter((v) => v > 0);
+    const studentIds = [state?.regularA?.studentId, state?.regularB?.studentId].map((v) => Number(v || 0)).filter((v) => v > 0);
     const adminId = Number(state?.admin?.adminId || 0) || null;
     if (examId) {
       await client.query("DELETE FROM regular_exam_feedback WHERE exam_id = $1", [examId]);
@@ -196,10 +209,6 @@ const { Client } = require("pg");
       await client.query("DELETE FROM regular_exams WHERE exam_id = $1", [examId]);
     }
     for (const studentId of studentIds) {
-      await client.query("DELETE FROM walkin_exam_feedback WHERE student_id = $1", [studentId]);
-      await client.query("DELETE FROM walkin_final_results WHERE student_id = $1", [studentId]);
-      await client.query("DELETE FROM walkin_student_answers WHERE student_id = $1", [studentId]);
-      await client.query("DELETE FROM walkin_student_exam WHERE student_id = $1", [studentId]);
       await client.query("DELETE FROM regular_exam_feedback WHERE student_id = $1", [studentId]);
       await client.query("DELETE FROM regular_student_answers WHERE student_id = $1", [studentId]);
       await client.query("DELETE FROM regular_student_results WHERE student_id = $1", [studentId]);
@@ -209,6 +218,12 @@ const { Client } = require("pg");
     }
     if (adminId) {
       await client.query("DELETE FROM admins WHERE admin_id = $1", [adminId]);
+    }
+    const seededTechnicalQuestionIds = Array.isArray(state?.seededTechnicalQuestionIds)
+      ? state.seededTechnicalQuestionIds.map((value) => Number(value || 0)).filter((value) => value > 0)
+      : [];
+    if (seededTechnicalQuestionIds.length > 0) {
+      await client.query("DELETE FROM regular_technical_questions WHERE question_id = ANY($1::bigint[])", [seededTechnicalQuestionIds]);
     }
   } finally {
     await client.end();

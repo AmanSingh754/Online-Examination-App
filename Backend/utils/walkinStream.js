@@ -1,7 +1,8 @@
 const STREAM_BY_CODE = {
     DS: "Data Science",
     DA: "Data Analytics",
-    MERN: "MERN"
+    MERN: "MERN",
+    AAI: "Agentic AI"
 };
 
 function getCanonicalWalkinStreamCode(value) {
@@ -10,6 +11,7 @@ function getCanonicalWalkinStreamCode(value) {
     if (compact === "DS" || compact.includes("DATASCIENCE")) return "DS";
     if (compact === "DA" || compact.includes("DATAANALYTICS")) return "DA";
     if (compact === "MERN" || compact.includes("FULLSTACK")) return "MERN";
+    if (compact === "AAI" || compact.includes("AGENTICAI")) return "AAI";
     return null;
 }
 
@@ -26,7 +28,13 @@ function getWalkinStreamQuestionKey(value) {
     const code = getWalkinStreamCodeOrDefault(value);
     if (code === "DS") return "datascience";
     if (code === "DA") return "dataanalytics";
+    if (code === "AAI") return "agenticai";
     return "mern";
+}
+
+function isWalkinCodingEnabled(value) {
+    const code = getWalkinStreamCodeOrDefault(value);
+    return code !== "DA" && code !== "AAI";
 }
 
 module.exports = {
@@ -34,5 +42,6 @@ module.exports = {
     getCanonicalWalkinStreamCode,
     getWalkinStreamCodeOrDefault,
     getWalkinStreamLabel,
-    getWalkinStreamQuestionKey
+    getWalkinStreamQuestionKey,
+    isWalkinCodingEnabled
 };

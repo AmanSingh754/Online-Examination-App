@@ -1,35 +1,6 @@
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 
-// const mysql = require("mysql2");
-//
-// const db = mysql.createConnection({
-//     host: process.env.DB_HOST || "localhost",
-//     port: Number(process.env.DB_PORT || 3306),
-//     user: process.env.DB_USER || "root",
-//     password: process.env.DB_PASSWORD || "12345",
-//     database: process.env.DB_NAME || "Project1",
-//     timezone: process.env.DB_TIMEZONE || "+05:30"
-// });
-//
-// db.connect((err) => {
-//     if (err) {
-//         console.error("MySQL connection failed:", err);
-//     } else {
-//         db.query(
-//             "SET time_zone = ?",
-//             [process.env.DB_TIMEZONE || "+05:30"],
-//             (tzErr) => {
-//                 if (tzErr) {
-//                     console.warn("Could not set MySQL session timezone:", tzErr?.message || tzErr);
-//                 }
-//                 console.log("MySQL connected successfully");
-//             }
-//         );
-//     }
-// });
-//
-// module.exports = db;
 
 const { Pool } = require("pg");
 
@@ -96,8 +67,93 @@ const isConnectionResetLikeError = (error) => {
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const convertMysqlPlaceholdersToPg = (sql) => {
+    const source = String(sql);
     let idx = 0;
-    return String(sql).replace(/\?/g, () => `$${++idx}`);
+    let result = "";
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+
+    for (let i = 0; i < source.length; i += 1) {
+        const char = source[i];
+        const next = source[i + 1];
+
+        if (inLineComment) {
+            result += char;
+            if (char === "\n") {
+                inLineComment = false;
+            }
+            continue;
+        }
+
+        if (inBlockComment) {
+            result += char;
+            if (char === "*" && next === "/") {
+                result += next;
+                i += 1;
+                inBlockComment = false;
+            }
+            continue;
+        }
+
+        if (inSingleQuote) {
+            result += char;
+            if (char === "'" && next === "'") {
+                result += next;
+                i += 1;
+                continue;
+            }
+            if (char === "'") {
+                inSingleQuote = false;
+            }
+            continue;
+        }
+
+        if (inDoubleQuote) {
+            result += char;
+            if (char === "\"") {
+                inDoubleQuote = false;
+            }
+            continue;
+        }
+
+        if (char === "-" && next === "-") {
+            result += char + next;
+            i += 1;
+            inLineComment = true;
+            continue;
+        }
+
+        if (char === "/" && next === "*") {
+            result += char + next;
+            i += 1;
+            inBlockComment = true;
+            continue;
+        }
+
+        if (char === "'") {
+            result += char;
+            inSingleQuote = true;
+            continue;
+        }
+
+        if (char === "\"") {
+            result += char;
+            inDoubleQuote = true;
+            continue;
+        }
+
+        if (char === "?") {
+            idx += 1;
+            result += `$${idx}`;
+            continue;
+        }
+
+        result += char;
+    }
+
+    return result;
 };
 
 const normalizePgResult = (result) => {

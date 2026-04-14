@@ -996,44 +996,72 @@ router.post("/result", async (req, res) => {
             return res.json({ success: false, message: "Regular question set not found" });
         }
 
-        const totalRows = await queryAsync(
-            `SELECT COUNT(*) AS total
-             FROM regular_exam_questions
-             WHERE exam_id = ?
-               AND question_set_id = ?
+        const sectionRows = await queryAsync(
+            `SELECT
+                CASE
+                    WHEN UPPER(COALESCE(q.section_name, '')) = 'APTITUDE' THEN 'APTITUDE'
+                    ELSE 'TECHNICAL'
+                END AS result_section,
+                COUNT(*)::int AS total_questions,
+                SUM(
+                    CASE
+                        WHEN sa.selected_option IS NOT NULL
+                         AND sa.selected_option = q.correct_answer
+                        THEN 1
+                        ELSE 0
+                    END
+                )::int AS correct_answers
+             FROM regular_exam_questions q
+             LEFT JOIN regular_student_answers sa
+               ON sa.student_id = ?
+              AND sa.exam_id = q.exam_id
+              AND COALESCE(sa.question_set_id, ?) = q.question_set_id
+              AND sa.question_id = q.question_id
+             WHERE q.exam_id = ?
+               AND q.question_set_id = ?
                AND (
-                   UPPER(COALESCE(section_name, '')) = 'APTITUDE'
-                   OR UPPER(COALESCE(section_name, '')) = UPPER(COALESCE(?, ''))
-               )`,
-            [examId, questionSetId, allowedTechnicalSection || null]
+                   UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
+                   OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, ''))
+               )
+             GROUP BY result_section
+             ORDER BY result_section`,
+            [studentId, questionSetId, examId, questionSetId, allowedTechnicalSection || null]
         );
-        const total = Number(totalRows?.[0]?.total || 0);
+
+        const sectionMap = new Map(
+            (Array.isArray(sectionRows) ? sectionRows : []).map((row) => [
+                String(row?.result_section || "").trim().toUpperCase(),
+                {
+                    correct: Number(row?.correct_answers || 0),
+                    total: Number(row?.total_questions || 0)
+                }
+            ])
+        );
+
+        const aptitude = sectionMap.get("APTITUDE") || { correct: 0, total: 0 };
+        const technical = sectionMap.get("TECHNICAL") || { correct: 0, total: 0 };
+        const total = aptitude.total + technical.total;
         if (!total) {
             return res.json({ success: false, message: "No regular exam questions found" });
         }
 
-        const correctRows = await queryAsync(
-            `SELECT COUNT(*) AS correct
-             FROM regular_student_answers sa
-             JOIN regular_exam_questions q
-               ON sa.question_id = q.question_id
-              AND q.question_set_id = COALESCE(sa.question_set_id, ?)
-             WHERE sa.student_id = ?
-               AND sa.exam_id = ?
-               AND sa.selected_option = q.correct_answer
-               AND COALESCE(sa.question_set_id, ?) = ?
-               AND (
-                   UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
-                   OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, ''))
-               )`,
-            [questionSetId, studentId, examId, questionSetId, questionSetId, allowedTechnicalSection || null]
-        );
-        const correct = Number(correctRows?.[0]?.correct || 0);
+        const correct = aptitude.correct + technical.correct;
         const scorePercent = total > 0 ? Number(((correct / total) * 100).toFixed(2)) : 0;
+        const buildSectionSummary = (label, section) => ({
+            label,
+            correct: section.correct,
+            total: section.total,
+            percent: section.total > 0 ? Number(((section.correct / section.total) * 100).toFixed(2)) : 0
+        });
+
         return res.json({
             success: true,
             totalMarks: `${correct}/${total}`,
-            scorePercent
+            scorePercent,
+            sections: {
+                aptitude: buildSectionSummary("Aptitude", aptitude),
+                technical: buildSectionSummary("Technical", technical)
+            }
         });
     } catch (error) {
         console.error("Regular result lookup error:", error);

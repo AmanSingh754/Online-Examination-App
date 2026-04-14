@@ -12,7 +12,8 @@ const {
     getCanonicalWalkinStreamCode,
     getWalkinStreamCodeOrDefault,
     getWalkinStreamQuestionKey,
-    getWalkinStreamLabel
+    getWalkinStreamLabel,
+    isWalkinCodingEnabled
 } = require("../utils/walkinStream");
 const { getRegularTechnicalSection } = require("../utils/courseBackground");
 
@@ -69,6 +70,7 @@ const isWalkinSessionStudent = (req) => isWalkinStudentType(req.session?.student
 const getWalkinDurationMinutes = (streamCode) => {
     if (streamCode === "DS") return 60;
     if (streamCode === "DA") return 50;
+    if (streamCode === "AAI") return 60;
     return 80; // MERN default
 };
 const getDescriptiveWordLimit = (questionId) => {
@@ -1646,7 +1648,7 @@ router.get("/regular_exam_questions/:examId", (req, res) => {
                 const runWalkinQuestionQuery = () => {
                     const stream = String(walkinExam.stream || "").trim();
                     const streamCode = normalizeWalkinStream(stream);
-                    const includeCoding = streamCode !== "DA";
+                    const includeCoding = isWalkinCodingEnabled(streamCode);
                     const streamQuestionKey = String(getWalkinStreamQuestionKey(streamCode) || "").toLowerCase();
                     const streamLabelCompact = String(getWalkinStreamDbLabel(streamCode) || "")
                         .toLowerCase()
@@ -1745,7 +1747,8 @@ router.get("/walkin-streams", (req, res) => {
                 WHEN 'data science' THEN 1
                 WHEN 'data analytics' THEN 2
                 WHEN 'mern' THEN 3
-                ELSE 4
+                WHEN 'agentic ai' THEN 4
+                ELSE 5
             END,
             stream
         `,
@@ -2226,11 +2229,11 @@ router.post("/submit", async (req, res) => {
                 }
             }
         }
-        let isDataAnalyticsWalkin = false;
+        let codingDisabledForWalkin = false;
         if (isWalkin) {
             if (walkinExamRows && walkinExamRows.length > 0) {
                 const stream = String(walkinExamRows?.[0]?.stream || "");
-                isDataAnalyticsWalkin = normalizeWalkinStream(stream) === "DA";
+                codingDisabledForWalkin = !isWalkinCodingEnabled(stream);
             } else {
                 const examRows = await queryAsync(
                 `
@@ -2241,12 +2244,12 @@ router.post("/submit", async (req, res) => {
                 `,
                 [examId]
                 );
-                const course = String(examRows?.[0]?.course || "").trim().toLowerCase();
-                isDataAnalyticsWalkin = course === "data analytics";
+                const course = String(examRows?.[0]?.course || "").trim();
+                codingDisabledForWalkin = !isWalkinCodingEnabled(course);
             }
         }
 
-        if (isDataAnalyticsWalkin) {
+        if (codingDisabledForWalkin) {
             const hasCodingAnswer = submittedAnswers.some(
                 (answer) => {
                     const qType = String(answer?.question_type || "").trim().toUpperCase();
@@ -2258,7 +2261,7 @@ router.post("/submit", async (req, res) => {
             if (hasCodingAnswer) {
                 return res.status(400).json({
                     success: false,
-                    message: "Coding section is not allowed for Data Analytics walk-in regular_exams"
+                    message: "Coding section is not allowed for this walk-in exam"
                 });
             }
         }
@@ -2653,7 +2656,7 @@ router.post("/result", (req, res) => {
                             .toLowerCase()
                             .replace(/[^a-z0-9]/g, "");
                         const streamCodeCompact = String(streamCode || "").toLowerCase();
-                        const includeCoding = streamCode !== "DA";
+                        const includeCoding = isWalkinCodingEnabled(streamCode);
                         const maxRows = await queryAsync(
                             `
                             SELECT
