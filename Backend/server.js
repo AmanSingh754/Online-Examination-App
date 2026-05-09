@@ -49,8 +49,7 @@ if (trustProxy > 0) {
 // Session store removed for Vercel
 
 const reactDist = path.join(__dirname, "../frontend-react/dist");
-const legacyFrontend = path.join(__dirname, "../Frontend");
-const hasReactBuild = fs.existsSync(reactDist);
+const hasReactBuild = fs.existsSync(reactDist) && fs.existsSync(path.join(reactDist, "index.html"));
 const startupState = {
     startedAt: new Date().toISOString(),
     ready: false,
@@ -171,9 +170,6 @@ app.use(
 
 if (hasReactBuild) {
     app.use(express.static(reactDist));
-    app.use(express.static(legacyFrontend));
-} else {
-    app.use(express.static(legacyFrontend));
 }
 
 const sendIndex = (res) => {
@@ -184,14 +180,6 @@ const sendIndex = (res) => {
     if (hasReactBuild) {
         return res.sendFile(path.join(reactDist, "index.html"));
     }
-
-    const legacyIndex = path.join(legacyFrontend, "index.html");
-    if (fs.existsSync(legacyIndex)) {
-        return res.sendFile(legacyIndex);
-    }
-
-    res.status(404).send("Missing frontend build");
-};
 
 const requireAdminPage = (req, res, next) => {
     if (req.session?.admin) {
