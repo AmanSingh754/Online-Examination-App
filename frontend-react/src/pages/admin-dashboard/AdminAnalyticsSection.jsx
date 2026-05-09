@@ -1,22 +1,14 @@
 function AdminAnalyticsSection({
   studentCount,
-  regularStudentCount,
-  regularStudentsPercent,
   walkinStudentCount,
   walkinStudentsPercent,
-  regularResultedCount,
-  regularResultedPercent,
   walkinResultedCount,
   walkinResultedPercent,
   selectedRegistrationEntry,
   previousRegistrationEntry,
   registrationMonthOffset,
   setRegistrationMonthOffset,
-  enrollmentSectionBars,
-  registeredBdeCount,
-  assignedBdeCount,
-  unassignedBdeCount,
-  assignmentCoveragePercent
+  enrollmentSectionBars
 }) {
   return (
     <div className="dashboard-section admin-section" id="admin-analytics">
@@ -28,20 +20,10 @@ function AdminAnalyticsSection({
             <span className="stat-value">{studentCount}</span>
             <span className="stat-meta">Registered learners</span>
           </div>
-          <div className="stat-card stat-card-regular">
-            <span className="stat-label">Regular Exam Students</span>
-            <span className="stat-value">{regularStudentCount}</span>
-            <span className="stat-meta">{regularStudentsPercent.toFixed(0)}% of total students</span>
-          </div>
           <div className="stat-card stat-card-walkin">
             <span className="stat-label">Walk-In Exam Students</span>
             <span className="stat-value">{walkinStudentCount}</span>
             <span className="stat-meta">{walkinStudentsPercent.toFixed(0)}% of total students</span>
-          </div>
-          <div className="stat-card stat-card-regular-result">
-            <span className="stat-label">Regular Resulted Students</span>
-            <span className="stat-value">{regularResultedCount}</span>
-            <span className="stat-meta">{regularResultedPercent.toFixed(0)}% of regular students</span>
           </div>
           <div className="stat-card stat-card-walkin-result">
             <span className="stat-label">Walk-In Resulted Students</span>
@@ -92,40 +74,10 @@ function AdminAnalyticsSection({
             </div>
             <div className="chart-card">
               <div className="chart-header">
-                <h3>Regular vs Walk-In</h3>
-                <span>{studentCount} total</span>
-              </div>
-              <div className="chart-canvas chart-canvas-compact">
-                <div className="simple-donut-row">
-                  <div className="simple-donut-card">
-                    <div
-                      className="simple-donut"
-                      style={{ "--donut-percent": `${regularStudentsPercent}%` }}
-                    >
-                      <div className="simple-donut-center">{regularStudentsPercent.toFixed(0)}%</div>
-                    </div>
-                    <p className="simple-donut-label">Regular ({regularStudentCount})</p>
-                  </div>
-                  <div className="simple-donut-card">
-                    <div
-                      className="simple-donut simple-donut-alt"
-                      style={{ "--donut-percent": `${walkinStudentsPercent}%` }}
-                    >
-                      <div className="simple-donut-center">{walkinStudentsPercent.toFixed(0)}%</div>
-                    </div>
-                    <p className="simple-donut-label">Walk-In ({walkinStudentCount})</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className="chart-row">
-            <div className="chart-card">
-              <div className="chart-header">
                 <h3>Enrollment by Section</h3>
                 <span>{studentCount} total students</span>
               </div>
-              <div className="chart-canvas chart-canvas-compact">
+              <div className="chart-canvas chart-canvas-compact chart-canvas-enrollment">
                 <div className="section-enrollment-bars">
                   {enrollmentSectionBars.map((entry) => (
                     <div className={`section-enrollment-row tone-${entry.tone}`} key={`enroll-row-${entry.label}`}>
@@ -141,26 +93,6 @@ function AdminAnalyticsSection({
                       </div>
                     </div>
                   ))}
-                </div>
-              </div>
-            </div>
-            <div className="chart-card">
-              <div className="chart-header">
-                <h3>Registered BDEs</h3>
-                <span>{registeredBdeCount} total</span>
-              </div>
-              <div className="chart-canvas chart-canvas-compact">
-                <div className="kpi-wrap">
-                  <p className="kpi-value">{registeredBdeCount}</p>
-                  <p className="kpi-label">Total Registered BDEs</p>
-                  <div className="kpi-split">
-                    <span>Assigned: {assignedBdeCount}</span>
-                    <span>Unassigned: {unassignedBdeCount}</span>
-                  </div>
-                  <div className="kpi-split">
-                    <span>Assignment Coverage: {assignmentCoveragePercent.toFixed(0)}%</span>
-                    <span>Total Students: {studentCount}</span>
-                  </div>
                 </div>
               </div>
             </div>

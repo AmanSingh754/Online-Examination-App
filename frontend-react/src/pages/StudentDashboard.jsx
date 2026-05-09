@@ -31,7 +31,7 @@ function StudentDashboard() {
 
   useEffect(() => {
     if (![...availableExams, ...attemptedExams].length) return;
-    localStorage.setItem("studentType", isWalkinDashboard ? "WALK_IN" : "REGULAR");
+    localStorage.setItem("studentType", "WALK_IN");
   }, [attemptedExams, availableExams, isWalkinDashboard]);
 
   const loadAvailableExams = useCallback(async () => {
@@ -86,7 +86,7 @@ function StudentDashboard() {
     if (startingExamId !== null) return;
     setStartingExamId(examId);
     try {
-      const endpointBase = isWalkinStudent ? "/exam" : "/exam/regular";
+      const endpointBase = "/exam";
       const response = await fetch(`${endpointBase}/attempted/${studentId}/${examId}`, {
         credentials: "include"
       });
@@ -191,7 +191,7 @@ function StudentDashboard() {
       <header className="dashboard-topbar student-header" id="student-overview">
         <div className="topbar-left">
           <div className="brand-logo">
-            <img src="/dashboard-logo.png" alt="RP2 Rounded Professional Program" />
+            <img src="/dashboard-logo.png" alt="Online Examination App" />
           </div>
         </div>
         <div className="topbar-actions">
@@ -432,11 +432,11 @@ function StudentDashboard() {
           <img
             className="dashboard-footer-logo"
             src="/image.png"
-            alt="RP2 Rounded Professional Program - Elevating Employability"
+            alt="Online Examination App"
           />
         </div>
         <div className="dashboard-footer-divider" />
-        <p className="dashboard-footer-copy">© 2026 RP2 Inc. All rights reserved.</p>
+        <p className="dashboard-footer-copy">© 2026 Online Examination App All rights reserved.</p>
       </footer>
     </div>
   );

@@ -1000,6 +1000,11 @@
     height: 214px;
 }
 
+.admin-dashboard .chart-canvas-enrollment {
+    height: auto;
+    min-height: 214px;
+}
+
 .admin-dashboard .chart-canvas-monthly {
     position: relative;
     display: grid;
@@ -1223,6 +1228,11 @@
     box-shadow: 0 0 9px rgba(167, 139, 250, 0.45);
 }
 
+.admin-dashboard .regular-walkin-row.tone-interns-test .rw-dot {
+    background: rgba(251, 146, 60, 0.95);
+    box-shadow: 0 0 9px rgba(251, 146, 60, 0.45);
+}
+
 .admin-dashboard .regular-walkin-row-track {
     height: 10px;
     border-radius: 999px;
@@ -1256,6 +1266,10 @@
 
 .admin-dashboard .regular-walkin-row.tone-agentic-ai .regular-walkin-row-fill {
     background: linear-gradient(90deg, rgba(167, 139, 250, 0.95), rgba(129, 140, 248, 0.95));
+}
+
+.admin-dashboard .regular-walkin-row.tone-interns-test .regular-walkin-row-fill {
+    background: linear-gradient(90deg, rgba(251, 146, 60, 0.95), rgba(249, 115, 22, 0.95));
 }
 
 .admin-dashboard .rw-insight-row {
@@ -1695,27 +1709,36 @@
 .admin-dashboard .section-enrollment-bars {
     display: grid;
     gap: 12px;
-    align-content: center;
+    align-content: start;
     padding: 8px 0;
 }
 
 .admin-dashboard .section-enrollment-row {
     display: grid;
     gap: 6px;
+    min-width: 0;
 }
 
 .admin-dashboard .section-enrollment-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 12px;
     font-size: 12px;
     color: rgba(226, 232, 240, 0.9);
     letter-spacing: 0.03em;
 }
 
+.admin-dashboard .section-enrollment-head span:first-child {
+    flex: 1;
+    min-width: 0;
+}
+
 .admin-dashboard .section-enrollment-head span:last-child {
     font-weight: 700;
     color: rgba(241, 245, 249, 0.96);
+    white-space: nowrap;
+    flex-shrink: 0;
 }
 
 .admin-dashboard .section-enrollment-track {
@@ -1751,6 +1774,10 @@
 
 .admin-dashboard .section-enrollment-row.tone-agentic-ai .section-enrollment-fill {
     background: linear-gradient(90deg, rgba(167, 139, 250, 0.95), rgba(129, 140, 248, 0.95));
+}
+
+.admin-dashboard .section-enrollment-row.tone-interns-test .section-enrollment-fill {
+    background: linear-gradient(90deg, rgba(251, 146, 60, 0.95), rgba(249, 115, 22, 0.95));
 }
 
 .admin-dashboard .chart-card-wide .chart-header h3 {
@@ -2980,6 +3007,22 @@
 .walkin-review-head {
     display: grid;
     gap: 10px;
+}
+
+.admin-dashboard .review-submission-badge {
+    margin: 0;
+    width: fit-content;
+    max-width: 100%;
+    padding: 8px 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(242, 208, 126, 0.35);
+    background: linear-gradient(135deg, rgba(242, 208, 126, 0.14), rgba(115, 120, 240, 0.12));
+    color: #f8e2a5;
+    font-size: 0.95rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .walkin-review-topline {

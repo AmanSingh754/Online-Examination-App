@@ -1,19 +1,20 @@
-﻿const path = require("path");
+const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, ".env") });
 process.env.TZ = process.env.APP_TIMEZONE || "Asia/Kolkata";
 const express = require("express");
 const session = require("express-session");
 const fs = require("fs");
-const MySQLSessionStore = require("./mysqlSessionStore");
+
 const db = require("./db");
 
 
 const studentRoutes = require("./routes/student.routes");
 const examRoutes = require("./routes/exam.routes");
-const regularExamRoutes = require("./routes/regularExam.routes");
+
 const adminRoutes = require("./routes/admin.routes");
 
 const app = express();
+app.disable("x-powered-by");
 const sessionTtlMs = Number(process.env.SESSION_TTL_MS || 1000 * 60 * 60 * 8);
 const sessionSecret = String(process.env.SESSION_SECRET || "").trim();
 if (!sessionSecret) {
@@ -38,32 +39,84 @@ const sessionCookieHttpOnly = rawSessionCookieHttpOnly !== "false";
 const sessionCookieDomain = String(process.env.SESSION_COOKIE_DOMAIN || "").trim() || undefined;
 const sessionCookiePath = String(process.env.SESSION_COOKIE_PATH || "/").trim() || "/";
 const trustProxy = Number(process.env.TRUST_PROXY || (isProduction ? 1 : 0));
+if (isProduction && sessionSecret.length < 32) {
+    throw new Error("SESSION_SECRET must be at least 32 characters in production.");
+}
 if (trustProxy > 0) {
     app.set("trust proxy", trustProxy);
 }
 
-const sessionStore = new MySQLSessionStore({
-    host: process.env.PG_HOST || process.env.DB_HOST || "localhost",
-    port: Number(process.env.PG_PORT || process.env.DB_PORT || 5432),
-    user: process.env.PG_USER || process.env.DB_USER,
-    password: process.env.PG_PASSWORD || process.env.DB_PASSWORD,
-    database: process.env.PG_DATABASE || process.env.DB_NAME,
-    tableName: process.env.SESSION_TABLE_NAME || "user_sessions",
-    ttlMs: sessionTtlMs,
-    cleanupMs: Number(process.env.SESSION_CLEANUP_MS || 1000 * 60 * 15),
-    ssl: String(process.env.PG_SSL || "").toLowerCase() === "true"
-        ? { rejectUnauthorized: String(process.env.PG_SSL_REJECT_UNAUTHORIZED || "false").toLowerCase() === "true" }
-        : undefined
-});
-app.locals.sessionStore = sessionStore;
+// Session store removed for Vercel
 
 const reactDist = path.join(__dirname, "../frontend-react/dist");
 const legacyFrontend = path.join(__dirname, "../Frontend");
 const hasReactBuild = fs.existsSync(reactDist);
+const startupState = {
+    startedAt: new Date().toISOString(),
+    ready: false,
+    completedAt: null,
+    lastError: ""
+};
 
-app.use(express.json());
+const createRateLimiter = ({
+    windowMs,
+    max,
+    keyBuilder,
+    skip
+}) => {
+    const buckets = new Map();
+    const prune = () => {
+        const now = Date.now();
+        for (const [key, bucket] of buckets.entries()) {
+            if (bucket.resetAt <= now) buckets.delete(key);
+        }
+    };
+    const timer = setInterval(prune, Math.max(1000, Math.min(windowMs, 60000)));
+    if (typeof timer.unref === "function") timer.unref();
+
+    return (req, res, next) => {
+        if (typeof skip === "function" && skip(req)) return next();
+        const key =
+            (typeof keyBuilder === "function" ? keyBuilder(req) : "") ||
+            req.ip ||
+            "anonymous";
+        const now = Date.now();
+        const existing = buckets.get(key);
+        if (!existing || existing.resetAt <= now) {
+            buckets.set(key, { count: 1, resetAt: now + windowMs });
+            return next();
+        }
+        existing.count += 1;
+        if (existing.count > max) {
+            const retryAfterSeconds = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+            res.set("Retry-After", String(retryAfterSeconds));
+            return res.status(429).json({
+                success: false,
+                message: "Too many requests. Please retry shortly."
+            });
+        }
+        return next();
+    };
+};
+
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "1mb" }));
+app.use((req, res, next) => {
+    const requestId = String(
+        req.headers["x-request-id"] ||
+        `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    );
+    req.requestId = requestId;
+    res.setHeader("X-Request-Id", requestId);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "same-origin");
+    res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
+    if (isProduction) {
+        res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
+    next();
+});
 const sessionMiddleware = session({
-    store: sessionStore,
     name: process.env.SESSION_COOKIE_NAME || "exam.sid",
     secret: sessionSecret,
     resave: false,
@@ -82,7 +135,7 @@ const sessionMiddleware = session({
 const isAuthOrSessionSensitivePath = (urlPath = "") =>
     /^\/(student|exam|admin|bde)(\/|$)/i.test(String(urlPath || ""));
 app.use((req, res, next) => {
-    if (req.path === "/healthz") {
+    if (req.path === "/healthz" || req.path === "/readyz") {
         return next();
     }
     sessionMiddleware(req, res, (error) => {
@@ -97,6 +150,24 @@ app.use((req, res, next) => {
         return next(error);
     });
 });
+app.use(
+    createRateLimiter({
+        windowMs: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
+        max: Number(process.env.AUTH_RATE_LIMIT_MAX || 25),
+        keyBuilder: (req) => `${req.ip}|${req.path}`,
+        skip: (req) => !/^\/(student|admin)\/login$/i.test(req.path)
+    })
+);
+app.use(
+    createRateLimiter({
+        windowMs: Number(process.env.EXAM_MUTATION_RATE_LIMIT_WINDOW_MS || 60 * 1000),
+        max: Number(process.env.EXAM_MUTATION_RATE_LIMIT_MAX || 60),
+        keyBuilder: (req) =>
+            `${req.ip}|${req.session?.student?.studentId || req.session?.admin?.adminId || "anon"}|${req.path}`,
+        skip: (req) =>
+            !/^\/exam(\/regular)?\/(submit|feedback|draft\/autosave)$/i.test(req.path)
+    })
+);
 
 if (hasReactBuild) {
     app.use(express.static(reactDist));
@@ -129,13 +200,7 @@ const requireAdminPage = (req, res, next) => {
     return res.redirect("/admin/login");
 };
 
-const requireBdePage = (req, res, next) => {
-    const role = String(req.session?.admin?.role || "").trim().toUpperCase();
-    if (req.session?.admin && role === "BDE") {
-        return next();
-    }
-    return res.redirect("/bde/login");
-};
+
 
 const requireStudentPage = (req, res, next) => {
     if (req.session?.student) {
@@ -175,25 +240,13 @@ app.get(["/admin/login", "/admin/login/"], (req, res) => {
     return sendIndex(res);
 });
 
-app.get(["/bde", "/bde/"], (req, res) => {
-    if (hasReactBuild) {
-        return res.redirect("/bde/login");
-    }
-    return sendIndex(res);
-});
 
-app.get(["/bde/login", "/bde/login/"], (req, res) => {
-    if (hasReactBuild) {
-        return sendIndex(res);
-    }
-    return sendIndex(res);
-});
 
 app.get("/healthz", async (req, res) => {
-    const [dbState, sessionState] = await Promise.all([
-        db.healthCheck(),
-        sessionStore.healthCheck()
+    const [dbState] = await Promise.all([
+        db.healthCheck()
     ]);
+    const sessionState = { ok: true };
     const ok = Boolean(dbState?.ok) && Boolean(sessionState?.ok);
     return res.status(ok ? 200 : 503).json({
         ok,
@@ -206,14 +259,30 @@ app.get("/healthz", async (req, res) => {
     });
 });
 
+app.get("/readyz", async (req, res) => {
+    const [dbState] = await Promise.all([
+        db.healthCheck()
+    ]);
+    const sessionState = { ok: true };
+    const ok = startupState.ready && Boolean(dbState?.ok) && Boolean(sessionState?.ok);
+    return res.status(ok ? 200 : 503).json({
+        ok,
+        service: "exam-portal-backend",
+        timestamp: new Date().toISOString(),
+        startup: startupState,
+        checks: {
+            database: dbState,
+            sessionStore: sessionState
+        }
+    });
+});
+
 if (hasReactBuild) {
     app.get("/admin/dashboard", requireAdminPage, (req, res) => {
         sendIndex(res);
     });
 
-    app.get("/bde/dashboard", requireBdePage, (req, res) => {
-        sendIndex(res);
-    });
+
 
     app.get("/student/dashboard", requireStudentPage, (req, res) => {
         sendIndex(res);
@@ -230,17 +299,37 @@ if (hasReactBuild) {
 
 /* ROUTES */
 app.use("/student", studentRoutes);
-app.use("/exam/regular", regularExamRoutes);
+
 app.use("/exam", examRoutes);
 app.use("/admin", adminRoutes);
+
+const runStartupTasks = async () => {
+    try {
+        const routeStartupTasks = [
+            studentRoutes.startupSchemaSync,
+            examRoutes.startupSchemaSync,
+            adminRoutes.startupSchemaSync
+        ].filter((task) => typeof task === "function");
+        for (const task of routeStartupTasks) {
+            await task();
+        }
+        startupState.ready = true;
+        startupState.completedAt = new Date().toISOString();
+        startupState.lastError = "";
+        console.log("Startup checks completed successfully");
+    } catch (error) {
+        startupState.ready = false;
+        startupState.lastError = String(error?.message || error);
+        console.error("Startup checks failed:", startupState.lastError);
+    }
+};
 
 if (hasReactBuild) {
     app.get(/^\/(admin|student|bde)(\/.*)?$/, (req, res, next) => {
         if (
             req.path.startsWith("/admin/exams") ||
             req.path.startsWith("/admin/walkin") ||
-            req.path.startsWith("/admin/bde") ||
-            req.path.startsWith("/admin/bdes") ||
+
             req.path.startsWith("/student/exams") ||
             req.path.startsWith("/student/attempted-exams")
         ) {
@@ -261,16 +350,24 @@ const server = app.listen(port, () => {
         console.log("Serving legacy frontend (React dist not found)");
     }
     console.log(`Server running at http://localhost:${port}`);
+    runStartupTasks();
+});
+
+app.use((error, req, res, next) => {
+    const requestId = String(req?.requestId || "unknown");
+    console.error(`Unhandled request error [${requestId}]:`, error?.stack || error?.message || error);
+    if (res.headersSent) {
+        return next(error);
+    }
+    return res.status(500).json({
+        success: false,
+        message: "Internal server error",
+        requestId
+    });
 });
 
 const closeSessionStore = async () => {
-    if (sessionStore && typeof sessionStore.close === "function") {
-        try {
-            await sessionStore.close();
-        } catch (error) {
-            console.warn("Session store close warning:", String(error?.message || error));
-        }
-    }
+    // Session store removed
 };
 process.on("SIGINT", async () => {
     await closeSessionStore();
@@ -280,3 +377,5 @@ process.on("SIGTERM", async () => {
     await closeSessionStore();
     server.close(() => process.exit(0));
 });
+
+module.exports = app;

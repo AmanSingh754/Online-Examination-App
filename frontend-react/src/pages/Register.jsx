@@ -7,8 +7,8 @@ function Register() {
     <div className="landing-shell">
       <header className="landing-header">
         <div className="brand">
-          <img className="brand-logo" src="/assets/rp2-official.png" alt="RP2 logo" />
-          <span className="brand-text">RP2 Scholarship Exam</span>
+          <img className="brand-logo" src="/assets/rp2-official.png" alt="App logo" />
+          <span className="brand-text">Online Examination App</span>
         </div>
         <nav className="landing-nav">
           <a href="/" className="nav-link">Student Home</a>
@@ -42,7 +42,7 @@ function Register() {
       </main>
 
       <footer className="landing-footer">
-        © 2026 RP2 Inc. All rights reserved.
+        © 2026 Online Examination App All rights reserved.
       </footer>
     </div>
   );

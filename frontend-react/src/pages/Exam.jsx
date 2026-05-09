@@ -18,6 +18,68 @@ const INSTRUCTIONS = [
 ];
 const FEEDBACK_QUESTION =
   "Tell us about the exam, question quality, and overall difficulty (max 100 words).";
+const LEETCODE_CODING_CONFIGS = {
+  1: {
+    methodName: "reverseString",
+    pythonStarter: `class Solution:
+    def reverseString(self, s):
+        pass
+`,
+    javascriptStarter: `class Solution {
+  reverseString(s) {
+    
+  }
+}
+`,
+    cppStarter: `class Solution {
+public:
+    string reverseString(string s) {
+        
+    }
+};
+`
+  },
+  2: {
+    methodName: "numberPyramid",
+    pythonStarter: `class Solution:
+    def numberPyramid(self, n):
+        pass
+`,
+    javascriptStarter: `class Solution {
+  numberPyramid(n) {
+    
+  }
+}
+`,
+    cppStarter: `class Solution {
+public:
+    string numberPyramid(int n) {
+        
+    }
+};
+`
+  },
+  3: {
+    methodName: "twoSum",
+    pythonStarter: `class Solution:
+    def twoSum(self, numbers, target):
+        pass
+`,
+    javascriptStarter: `class Solution {
+  twoSum(numbers, target) {
+    
+  }
+}
+`,
+    cppStarter: `class Solution {
+public:
+    vector<int> twoSum(vector<int>& numbers, int target) {
+        
+    }
+};
+`
+  }
+};
 
 const SECTION_INSTRUCTIONS = {
   aptitude: {
@@ -49,34 +111,7 @@ const countWords = (text) =>
     .split(/\s+/)
     .filter(Boolean).length;
 
-const normalizeRegularTiming = (timing) => {
-  if (!timing || typeof timing !== "object") return null;
-  const startAtMs = new Date(timing.startAt || "").getTime();
-  const questionUnlockAtMs = new Date(timing.questionUnlockAt || "").getTime();
-  const submissionDeadlineAtMs = new Date(timing.submissionDeadlineAt || "").getTime();
-  if (!Number.isFinite(startAtMs) || !Number.isFinite(questionUnlockAtMs) || !Number.isFinite(submissionDeadlineAtMs)) {
-    return null;
-  }
-  const nowMs = Date.now();
-  const instructionWindowActive = nowMs >= startAtMs && nowMs < questionUnlockAtMs;
-  const questionsVisible = nowMs >= questionUnlockAtMs;
-  const submissionClosed = nowMs > submissionDeadlineAtMs;
-  return {
-    ...timing,
-    startAtMs,
-    questionUnlockAtMs,
-    submissionDeadlineAtMs,
-    instructionWindowActive,
-    questionsVisible,
-    submissionClosed,
-    startsInSeconds: nowMs < startAtMs ? Math.max(0, Math.ceil((startAtMs - nowMs) / 1000)) : 0,
-    unlockInSeconds: instructionWindowActive ? Math.max(0, Math.ceil((questionUnlockAtMs - nowMs) / 1000)) : 0,
-    remainingQuestionSeconds:
-      nowMs >= questionUnlockAtMs && nowMs <= submissionDeadlineAtMs
-        ? Math.max(0, Math.ceil((submissionDeadlineAtMs - nowMs) / 1000))
-        : 0
-  };
-};
+
 
 const getSectionInstruction = (sectionName) => {
   if (!sectionName) {
@@ -97,6 +132,15 @@ const getSectionInstruction = (sectionName) => {
 const getSectionDisplayName = (sectionName) => getSectionInstruction(sectionName).title;
 const isTechnicalSection = (sectionName) =>
   String(sectionName || "").trim().toLowerCase().includes("technical");
+const getLeetCodeConfig = (questionId) => LEETCODE_CODING_CONFIGS[Number(questionId || 0)] || null;
+const getCodingStarterTemplate = (questionId, language) => {
+  const config = getLeetCodeConfig(questionId);
+  if (!config) return "";
+  if (language === "python") return config.pythonStarter;
+  if (language === "javascript") return config.javascriptStarter;
+  if (language === "cpp") return config.cppStarter;
+  return "";
+};
 
 const enterFullscreen = () => {
   const docEl = document.documentElement;
@@ -167,8 +211,8 @@ export default function Exam() {
     .trim()
     .toUpperCase()
     .replace(/[\s-]/g, "_");
-  const isWalkinExamSession = storedStudentType === "WALKIN" || storedStudentType === "WALK_IN";
-  const examApiBase = isWalkinExamSession ? "/exam" : "/exam/regular";
+  const isWalkinExamSession = true;
+  const examApiBase = "/exam";
 
   const [questionBank, setQuestionBank] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -186,7 +230,6 @@ export default function Exam() {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [consoleLines, setConsoleLines] = useState([]);
-  const [codingInput] = useState("");
   const [codingOutput, setCodingOutput] = useState("");
   const [codingLanguage, setCodingLanguage] = useState(DEFAULT_LANGUAGE);
   const [codingLanguageByQuestion, setCodingLanguageByQuestion] = useState({});
@@ -217,7 +260,7 @@ export default function Exam() {
   const [descriptiveLimitMessage, setDescriptiveLimitMessage] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(null);
   const [remainingSeconds, setRemainingSeconds] = useState(null);
-  const [regularTiming, setRegularTiming] = useState(null);
+  
   const isIOS = isIOSPlatform();
   const fullscreenSupported = hasFullscreenSupport();
   const strictProctoringEnabled = !isIOS && fullscreenSupported;
@@ -234,13 +277,16 @@ export default function Exam() {
   const violationCooldownRef = useRef(0);
   const lastAutosavePayloadRef = useRef("");
   const autosaveInFlightRef = useRef(false);
+  const autosaveQueuedRef = useRef(false);
+  const autosaveTimerRef = useRef(null);
+  const autosavePayloadRef = useRef(null);
   const draftRecoveryAttemptedRef = useRef(false);
   const autoSubmitTriggeredRef = useRef(false);
   const timeAutoSubmitTriggeredRef = useRef(false);
   const focusLossActiveRef = useRef(false);
   const fullscreenViolationActiveRef = useRef(false);
   const securityNoticeTimeoutRef = useRef(null);
-  const isRegularInstructionPhase = !isWalkinExamSession && Boolean(regularTiming?.instructionWindowActive);
+  const isRegularInstructionPhase = false;
   const headerTimerLabel = isRegularInstructionPhase ? "Questions unlock in" : "Time left";
   const headerTimerSeconds = isRegularInstructionPhase
     ? Number(regularTiming?.unlockInSeconds || 0)
@@ -250,6 +296,9 @@ export default function Exam() {
     return () => {
       if (securityNoticeTimeoutRef.current) {
         clearTimeout(securityNoticeTimeoutRef.current);
+      }
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
       }
     };
   }, []);
@@ -708,54 +757,106 @@ export default function Exam() {
     setCurrentIndex(0);
   }, [examId]);
 
-  useEffect(() => {
+  const flushAutosave = useCallback(async () => {
     if (!examId || !questionBank.length) return;
     if (preExamOpen || submitSuccess || isSubmitting) return;
 
     const studentId = String(localStorage.getItem("studentId") || "").trim();
     if (!studentId) return;
 
-    const timer = setInterval(async () => {
-      if (autosaveInFlightRef.current) return;
-      const payloadAnswers = buildAnswersPayload();
-      if (!payloadAnswers.length) return;
+    const payloadAnswers = autosavePayloadRef.current || buildAnswersPayload();
+    if (!payloadAnswers.length) return;
 
-      const serializedPayload = JSON.stringify(payloadAnswers);
-      if (serializedPayload === lastAutosavePayloadRef.current) return;
+    const serializedPayload = JSON.stringify(payloadAnswers);
+    if (serializedPayload === lastAutosavePayloadRef.current) return;
 
-      try {
-        autosaveInFlightRef.current = true;
-        const response = await fetch(`${examApiBase}/draft/autosave`, {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            studentId,
-            examId,
-            answers: payloadAnswers
-          })
-        });
-        const data = await response.json().catch(() => ({}));
-        if (response.ok && data?.success) {
-          lastAutosavePayloadRef.current = serializedPayload;
-          setAutosaveStatus("Auto-saved");
-          return;
-        }
-        if (data?.submitted) {
-          setAutosaveStatus("Exam already submitted. Autosave stopped.");
-          return;
-        }
-        setAutosaveStatus("Autosave retrying...");
-      } catch (error) {
-        console.error("Exam autosave error:", error);
-        setAutosaveStatus("Autosave retrying...");
-      } finally {
-        autosaveInFlightRef.current = false;
+    if (autosaveInFlightRef.current) {
+      autosaveQueuedRef.current = true;
+      return;
+    }
+
+    try {
+      autosaveInFlightRef.current = true;
+      autosaveQueuedRef.current = false;
+      setAutosaveStatus("Saving...");
+      const response = await fetch(`${examApiBase}/draft/autosave`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          studentId,
+          examId,
+          answers: payloadAnswers
+        })
+      });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data?.success) {
+        lastAutosavePayloadRef.current = serializedPayload;
+        setAutosaveStatus("Auto-saved");
+        setTimeout(() => setAutosaveStatus(""), 3000);
+        return;
       }
-    }, 5000);
+      if (data?.submitted) {
+        setAutosaveStatus("Exam already submitted. Autosave stopped.");
+        return;
+      }
+      setAutosaveStatus("Autosave retrying...");
+      autosaveQueuedRef.current = true;
+    } catch (error) {
+      console.error("Exam autosave error:", error);
+      setAutosaveStatus("Autosave retrying...");
+      autosaveQueuedRef.current = true;
+    } finally {
+      autosaveInFlightRef.current = false;
+      const latestPayload = autosavePayloadRef.current || buildAnswersPayload();
+      const latestSerialized = JSON.stringify(latestPayload);
+      if (autosaveQueuedRef.current || latestSerialized !== lastAutosavePayloadRef.current) {
+        autosaveQueuedRef.current = false;
+        if (autosaveTimerRef.current) {
+          clearTimeout(autosaveTimerRef.current);
+        }
+        autosaveTimerRef.current = setTimeout(() => {
+          flushAutosave();
+        }, 250);
+      }
+    }
+  }, [buildAnswersPayload, examApiBase, examId, isSubmitting, preExamOpen, questionBank.length, submitSuccess]);
 
-    return () => clearInterval(timer);
-  }, [examApiBase, examId, preExamOpen, submitSuccess, isSubmitting, questionBank, buildAnswersPayload]);
+  useEffect(() => {
+    if (!examId || !questionBank.length) return;
+    if (preExamOpen || submitSuccess || isSubmitting) return;
+
+    const payloadAnswers = buildAnswersPayload();
+    if (!payloadAnswers.length) return;
+    autosavePayloadRef.current = payloadAnswers;
+
+    const serializedPayload = JSON.stringify(payloadAnswers);
+    if (serializedPayload === lastAutosavePayloadRef.current) return;
+
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+    }
+    autosaveTimerRef.current = setTimeout(() => {
+      flushAutosave();
+    }, 900);
+
+    return () => {
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+      }
+    };
+  }, [
+    answers,
+    buildAnswersPayload,
+    codingLanguageByQuestion,
+    codingRunSummary,
+    examId,
+    flushAutosave,
+    isSubmitting,
+    preExamOpen,
+    questionBank.length,
+    submitSuccess
+  ]);
 
   useEffect(() => {
     if (isWalkinExamSession) {
@@ -945,6 +1046,14 @@ export default function Exam() {
     }
   }, [currentQuestion, questionType, codingLanguageByQuestion, codingLanguage]);
 
+  useEffect(() => {
+    if (!currentQuestion || questionType !== "coding") return;
+    const starter = getCodingStarterTemplate(currentQuestion.question_id, codingLanguage);
+    if (!starter) return;
+    if (currentAnswer) return;
+    updateAnswer(currentQuestion, starter, codingLanguage);
+  }, [codingLanguage, currentAnswer, currentQuestion, questionType]);
+
   const logConsole = useCallback((message) => {
     setConsoleLines((prev) => [...prev, message]);
   }, []);
@@ -955,7 +1064,6 @@ export default function Exam() {
     setConsoleLines([]);
     setTestOutcomes([]);
     logConsole("> Code run invoked");
-    logConsole(`> Input: ${codingInput || "<NO INPUT>"}`);
 
     try {
     const response = await fetch("/exam/run-code", {
@@ -965,7 +1073,7 @@ export default function Exam() {
       body: JSON.stringify({
         language: codingLanguage,
         code: currentAnswer,
-        testcases: codingTestcases
+        questionId: currentQuestion?.question_id
       })
     });
       const data = await response.json();
@@ -1031,7 +1139,7 @@ export default function Exam() {
     } finally {
       setIsRunningCode(false);
     }
-  }, [codingInput, codingLanguage, codingTestcases, currentAnswer, currentQuestion, isRunningCode, logConsole]);
+  }, [codingLanguage, codingTestcases, currentAnswer, currentQuestion, isRunningCode, logConsole]);
 
   const handleSectionOverlayClose = () => {
     if (!pendingSection || pendingSectionIndex === null) {
@@ -1575,10 +1683,23 @@ export default function Exam() {
     <div className="coding-instructions">
       <h4>Instructions</h4>
       <ul>
-        <li>Read input from standard input (stdin) in your selected language.</li>
+        {getLeetCodeConfig(currentQuestion?.question_id) ? (
+          <>
+            <li>
+              Use LeetCode style. Implement <strong>{getLeetCodeConfig(currentQuestion?.question_id)?.methodName}</strong>
+              {" "}inside <strong>class Solution</strong>. The platform will call your method automatically.
+            </li>
+            <li>Do not read input manually from stdin for these coding questions.</li>
+            <li>Return the final answer from the method in the expected type and format.</li>
+          </>
+        ) : (
+          <>
+            <li>Read input from standard input (stdin) in your selected language.</li>
+            <li>Print only the required output to stdout.</li>
+          </>
+        )}
         <li>The platform/compiler will provide test input automatically at runtime.</li>
-        <li>Printing the output is necessary for testcase validation.</li>
-        <li>Do not hardcode input values; print only the required output to stdout.</li>
+        <li>Do not hardcode input values.</li>
         <li>Tests (including hidden ones) run automatically.</li>
         <li>Do not forget to click Save after running the code.</li>
       </ul>
@@ -1603,7 +1724,7 @@ export default function Exam() {
           return (
             <div key={`outcome-${idx}`} className={`test-outcome-box ${status}`}>
               <span className="test-label">
-                {isHidden ? `Hidden ${idx + 1}` : `Test ${idx + 1}`}
+                {isHidden ? `Hidden ${idx - 2}` : `Test ${idx + 1}`}
               </span>
               <strong>{status === "pass" ? "\u2713\u2713" : status === "fail" ? "\u2717\u2717" : "--"}</strong>
               {!isHidden && outcome && (
@@ -1612,13 +1733,19 @@ export default function Exam() {
                     <span>Input:</span> {formatTestValue(outcome.input)}
                   </p>
                   <p className="test-detail">
-                    <span>Output:</span>{" "}
-                    {formatTestValue(outcome.stdout || outcome.expected_output)}
+                    <span>Your Output:</span>{" "}
+                    {formatTestValue(outcome.stdout)}
                   </p>
+                  {!outcome.passed && (
+                    <p className="test-detail">
+                      <span>Expected:</span>{" "}
+                      {formatTestValue(outcome.expected_output)}
+                    </p>
+                  )}
                 </div>
               )}
               {isHidden && outcome && (
-                <span className="hidden-note">hidden test passed</span>
+                <span className="hidden-note">{outcome.passed ? "hidden test passed" : "hidden test failed"}</span>
               )}
             </div>
           );
@@ -2003,7 +2130,7 @@ export default function Exam() {
       <div className="exam-header">
         <div>
           <p className="eyebrow">Live proctored session</p>
-          <h1>RP2 Scholarship Exam</h1>
+          <h1>Online Examination App</h1>
         </div>
         <div className="header-chips">
           <div className="chip">

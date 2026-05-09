@@ -2,7 +2,8 @@ const STREAM_BY_CODE = {
     DS: "Data Science",
     DA: "Data Analytics",
     MERN: "MERN",
-    AAI: "Agentic AI"
+    AAI: "Agentic AI",
+    INT: "Interns Test"
 };
 
 function getCanonicalWalkinStreamCode(value) {
@@ -12,6 +13,7 @@ function getCanonicalWalkinStreamCode(value) {
     if (compact === "DA" || compact.includes("DATAANALYTICS")) return "DA";
     if (compact === "MERN" || compact.includes("FULLSTACK")) return "MERN";
     if (compact === "AAI" || compact.includes("AGENTICAI")) return "AAI";
+    if (compact === "INT" || compact.includes("INTERNSTEST") || compact.includes("INTERNSHIPTEST")) return "INT";
     return null;
 }
 
@@ -29,6 +31,7 @@ function getWalkinStreamQuestionKey(value) {
     if (code === "DS") return "datascience";
     if (code === "DA") return "dataanalytics";
     if (code === "AAI") return "agenticai";
+    if (code === "INT") return "internstest";
     return "mern";
 }
 

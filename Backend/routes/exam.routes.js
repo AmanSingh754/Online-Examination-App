@@ -9,6 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const {
+    STREAM_BY_CODE,
     getCanonicalWalkinStreamCode,
     getWalkinStreamCodeOrDefault,
     getWalkinStreamQuestionKey,
@@ -48,13 +49,16 @@ const cppExeExt = process.platform === "win32" ? ".exe" : "";
 const MAX_CODING_TESTCASES = 5;
 let walkinSummaryColumnChecked = false;
 let walkinAttemptedAtColumnChecked = false;
+let walkinSubmissionColumnsChecked = false;
 let regularStudentExamTableChecked = false;
 let regularExamFeedbackTableChecked = false;
 let resultsSubmittedAtColumnChecked = false;
+let resultsSubmissionColumnsChecked = false;
 let resultsFeedbackColumnsChecked = false;
 let walkinStudentExamTableChecked = false;
 let walkinAnswerSectionColumnChecked = false;
 let walkinAnswerSubmittedColumnChecked = false;
+let walkinAnswerCodingLanguageColumnChecked = false;
 const REGULAR_START_GRACE_MINUTES = 10;
 const normalizeWalkinStream = (value) => getWalkinStreamCodeOrDefault(value);
 const normalizeWalkinStreamStrict = (value) => getCanonicalWalkinStreamCode(value);
@@ -71,8 +75,24 @@ const getWalkinDurationMinutes = (streamCode) => {
     if (streamCode === "DS") return 60;
     if (streamCode === "DA") return 50;
     if (streamCode === "AAI") return 60;
+    if (streamCode === "INT") return 90;
     return 80; // MERN default
 };
+const normalizeSubmissionReason = (forceSubmit, rawReason) => {
+    if (!forceSubmit) return "MANUAL";
+    const normalized = String(rawReason || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[\s-]+/g, "_");
+    if (["TIME_OVER", "TIMEOUT", "TIME_UP", "TIMER_OVER"].includes(normalized)) {
+        return "TIME_OVER";
+    }
+    if (["VIOLATION", "VIOLATION_LIMIT", "PROCTORING_VIOLATION", "SECURITY_VIOLATION"].includes(normalized)) {
+        return "VIOLATION_LIMIT";
+    }
+    return "AUTO_SUBMIT";
+};
+const getSubmissionMode = (reason) => reason === "MANUAL" ? "MANUAL" : "AUTO_SUBMIT";
 const getDescriptiveWordLimit = (questionId) => {
     const id = Number(questionId || 0);
     if (id >= 1 && id <= 20) return 40;
@@ -86,6 +106,27 @@ const countWords = (text) =>
         .trim()
         .split(/\s+/)
         .filter(Boolean).length;
+
+const normalizeCodeExecutionOutput = (value) =>
+    String(value ?? "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
+        .replace(/\n+$/g, "");
+
+const normalizeOutputForComparison = (value, questionId) => {
+    const normalized = normalizeCodeExecutionOutput(value);
+    
+    // For question 2 (number pyramid), remove spaces within each line
+    // but preserve the line structure
+    if (questionId === 2) {
+        return normalized
+            .split("\n")
+            .map(line => line.replace(/\s+/g, "")) // Remove all spaces within the line
+            .join("\n");
+    }
+    
+    return normalized;
+};
 
 const addMinutes = (dateValue, minutes) => {
     const date = new Date(dateValue);
@@ -132,20 +173,6 @@ const getRegularExamTiming = (regularExam, nowMs = Date.now()) => {
 };
 
 const fetchLatestReadyRegularExamForCollege = async (collegeId) => {
-    const rows = await queryAsync(
-        `SELECT exam_id, exam_status, start_at, end_at, duration_minutes, college_id
-         FROM regular_exams
-         WHERE COALESCE(is_deleted, FALSE) = FALSE
-           AND exam_status = 'READY'
-           AND (college_id = ? OR college_id IS NULL)
-         ORDER BY
-             CASE WHEN college_id = ? THEN 0 ELSE 1 END,
-             start_at DESC NULLS LAST,
-             exam_id DESC
-         LIMIT 1`
-        ,
-        [collegeId || null, collegeId || null]
-    );
     return rows?.[0] || null;
 };
 
@@ -194,7 +221,7 @@ const ensureRegularStudentQuestionSet = async ({ studentId, examId, requestedStu
                 [studentId, examId]
             );
         } catch (insertError) {
-            const duplicate =
+            
                 Number(insertError?.errno) === 1062 ||
                 String(insertError?.code || "").toUpperCase() === "23505" ||
                 /duplicate key/i.test(String(insertError?.message || ""));
@@ -414,8 +441,8 @@ const spawnProcess = async (command, args, options) => {
         child.on("close", (code) => {
             clearTimeout(timer);
             resolve({
-                stdout: stdout.trim(),
-                stderr: stderr.trim(),
+                stdout: normalizeCodeExecutionOutput(stdout),
+                stderr: normalizeCodeExecutionOutput(stderr),
                 timedOut,
                 exitCode: code
             });
@@ -439,7 +466,7 @@ const runCodeWithRunnerAtDir = async (language, code, input = "", tempDir) => {
     const ctx = { file: filepath, dir: tempDir, exe: exePath };
     const runnerEnv = { ...process.env };
     if (language === "cpp") {
-        const mingwBin =
+        
             (path.isAbsolute(gppCommand) ? path.dirname(gppCommand) : null) ||
             resolveCommand(MINGW_HOME, "bin") ||
             resolveCommand("C:\\ProgramData\\mingw64\\mingw64\\bin") ||
@@ -552,8 +579,8 @@ const runCodeWithRunnerAtDir = async (language, code, input = "", tempDir) => {
                 clearTimeout(timer);
                 cleanupTempFiles();
                 resolve({
-                    stdout: stdout.trim(),
-                    stderr: stderr.trim(),
+                    stdout: normalizeCodeExecutionOutput(stdout),
+                    stderr: normalizeCodeExecutionOutput(stderr),
                     timedOut,
                     exitCode: code
                 });
@@ -596,6 +623,271 @@ const runCodeWithRunner = async (language, code, input = "") => {
 
     throw new Error("Code execution failed: no runnable temp directory available.");
 };
+
+const LEETCODE_CODING_CONFIGS = {
+    1: {
+        methodName: "reverseString",
+        title: "Reverse String"
+    },
+    2: {
+        methodName: "numberPyramid",
+        title: "Number Pyramid"
+    },
+    3: {
+        methodName: "twoSum",
+        title: "Two Sum II"
+    }
+};
+
+const hasCppMainFunction = (code) => /\bint\s+main\s*\(/i.test(String(code || ""));
+
+const buildPythonLeetCodeWrapper = (code, questionId, methodName) => {
+    const escapedMethodName = JSON.stringify(methodName);
+    return `${code}
+
+import ast as __lc_ast
+import re as __lc_re
+import inspect as __lc_inspect
+import sys as __lc_sys
+
+def __lc_parse_q1(raw):
+    return raw.rstrip("\\n").rstrip("\\r")
+
+def __lc_parse_q2(raw):
+    value = raw.strip()
+    return int(value) if value else 0
+
+def __lc_parse_q3(raw):
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(lines) >= 2:
+        return __lc_ast.literal_eval(lines[0]), int(lines[1])
+    numbers_match = __lc_re.search(r'numbers\\s*=\\s*(\\[[^\\]]*\\])', raw)
+    target_match = __lc_re.search(r'target\\s*=\\s*(-?\\d+)', raw)
+    if not numbers_match or not target_match:
+        raise ValueError("Invalid testcase input for twoSum")
+    return __lc_ast.literal_eval(numbers_match.group(1)), int(target_match.group(1))
+
+def __lc_format(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(str(item) for item in value) + "]"
+    return str(value)
+
+def __lc_pick_callable():
+    method_name = ${escapedMethodName}
+    solution_cls = globals().get("Solution")
+    if __lc_inspect.isclass(solution_cls):
+        instance = solution_cls()
+        method = getattr(instance, method_name, None)
+        if callable(method):
+            return method
+    free_fn = globals().get(method_name)
+    if callable(free_fn):
+        return free_fn
+    return None
+
+def __lc_args(question_id, raw):
+    if question_id == 1:
+        return (__lc_parse_q1(raw),)
+    if question_id == 2:
+        return (__lc_parse_q2(raw),)
+    if question_id == 3:
+        return __lc_parse_q3(raw)
+    return (raw,)
+
+def __lc_main():
+    raw = __lc_sys.stdin.read()
+    fn = __lc_pick_callable()
+    if fn is None:
+        return
+    result = fn(*__lc_args(${Number(questionId || 0)}, raw))
+    formatted = __lc_format(result)
+    if formatted is not None:
+        print(formatted)
+
+if __name__ == "__main__":
+    __lc_main()
+`;
+};
+
+const buildJavascriptLeetCodeWrapper = (code, questionId, methodName) => {
+    const escapedMethodName = JSON.stringify(methodName);
+    return `${code}
+
+const __lc_fs = require("fs");
+
+function __lc_parseQ1(raw) {
+    return raw.replace(/[\\r\\n]+$/, "");
+}
+
+function __lc_parseQ2(raw) {
+    const value = raw.trim();
+    return value ? Number(value) : 0;
+}
+
+function __lc_parseQ3(raw) {
+    const lines = raw.split(/\\r?\\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length >= 2) {
+        return [JSON.parse(lines[0]), Number(lines[1])];
+    }
+    const numbersMatch = raw.match(/numbers\\s*=\\s*(\\[[^\\]]*\\])/);
+    const targetMatch = raw.match(/target\\s*=\\s*(-?\\d+)/);
+    if (!numbersMatch || !targetMatch) {
+        throw new Error("Invalid testcase input for twoSum");
+    }
+    return [JSON.parse(numbersMatch[1]), Number(targetMatch[1])];
+}
+
+function __lc_format(value) {
+    if (value === undefined || value === null) return null;
+    if (Array.isArray(value)) return "[" + value.join(",") + "]";
+    return String(value);
+}
+
+function __lc_pickCallable() {
+    const methodName = ${escapedMethodName};
+    if (typeof Solution === "function") {
+        const instance = new Solution();
+        if (typeof instance[methodName] === "function") {
+            return instance[methodName].bind(instance);
+        }
+    }
+    if (typeof globalThis[methodName] === "function") {
+        return globalThis[methodName].bind(globalThis);
+    }
+    return null;
+}
+
+function __lc_args(questionId, raw) {
+    if (questionId === 1) return [__lc_parseQ1(raw)];
+    if (questionId === 2) return [__lc_parseQ2(raw)];
+    if (questionId === 3) return __lc_parseQ3(raw);
+    return [raw];
+}
+
+(async () => {
+    const raw = __lc_fs.readFileSync(0, "utf8");
+    const fn = __lc_pickCallable();
+    if (!fn) return;
+    const result = await fn(...__lc_args(${Number(questionId || 0)}, raw));
+    const formatted = __lc_format(result);
+    if (formatted !== null) {
+        process.stdout.write(formatted);
+    }
+})();
+`;
+};
+
+const buildCppLeetCodeWrapper = (code, questionId, methodName) => {
+    const numericQuestionId = Number(questionId || 0);
+    return `#include <bits/stdc++.h>
+using namespace std;
+
+static string __lc_read_all() {
+    return string((istreambuf_iterator<char>(cin)), istreambuf_iterator<char>());
+}
+
+static string __lc_rstrip_newlines(string value) {
+    while (!value.empty() && (value.back() == '\\n' || value.back() == '\\r')) {
+        value.pop_back();
+    }
+    return value;
+}
+
+static string __lc_trim(const string& value) {
+    size_t start = 0;
+    while (start < value.size() && isspace(static_cast<unsigned char>(value[start]))) start++;
+    size_t end = value.size();
+    while (end > start && isspace(static_cast<unsigned char>(value[end - 1]))) end--;
+    return value.substr(start, end - start);
+}
+
+static vector<string> __lc_split_lines(const string& raw) {
+    vector<string> lines;
+    string current;
+    stringstream ss(raw);
+    while (getline(ss, current)) {
+        string trimmed = __lc_trim(current);
+        if (!trimmed.empty()) lines.push_back(trimmed);
+    }
+    return lines;
+}
+
+static vector<int> __lc_parse_int_array(string text) {
+    vector<int> values;
+    string number;
+    for (char ch : text) {
+        if (isdigit(static_cast<unsigned char>(ch)) || ch == '-') {
+            number.push_back(ch);
+        } else if (!number.empty()) {
+            values.push_back(stoi(number));
+            number.clear();
+        }
+    }
+    if (!number.empty()) values.push_back(stoi(number));
+    return values;
+}
+
+static pair<vector<int>, int> __lc_parse_q3(const string& raw) {
+    auto lines = __lc_split_lines(raw);
+    if (lines.size() >= 2) {
+        return { __lc_parse_int_array(lines[0]), stoi(lines[1]) };
+    }
+    smatch numbersMatch;
+    smatch targetMatch;
+    regex numbersRegex(R"(numbers\\s*=\\s*(\\[[^\\]]*\\]))");
+    regex targetRegex(R"(target\\s*=\\s*(-?\\d+))");
+    if (!regex_search(raw, numbersMatch, numbersRegex) || !regex_search(raw, targetMatch, targetRegex)) {
+        throw runtime_error("Invalid testcase input for twoSum");
+    }
+    return { __lc_parse_int_array(numbersMatch[1].str()), stoi(targetMatch[1].str()) };
+}
+
+static string __lc_format_vector(const vector<int>& values) {
+    string out = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) out += ",";
+        out += to_string(values[i]);
+    }
+    out += "]";
+    return out;
+}
+
+${code}
+
+int main() {
+    string raw = __lc_read_all();
+    Solution sol;
+${numericQuestionId === 1 ? `    auto result = sol.${methodName}(__lc_rstrip_newlines(raw));
+    cout << result;` : ""}
+${numericQuestionId === 2 ? `    auto result = sol.${methodName}(stoi(__lc_trim(raw)));
+    cout << result;` : ""}
+${numericQuestionId === 3 ? `    auto parsed = __lc_parse_q3(raw);
+    auto result = sol.${methodName}(parsed.first, parsed.second);
+    cout << __lc_format_vector(result);` : ""}
+    return 0;
+}
+`;
+};
+
+const buildLeetCodeWrappedCode = (language, code, questionId) => {
+    const config = LEETCODE_CODING_CONFIGS[Number(questionId || 0)];
+    if (!config) return code;
+    if (language === "python") {
+        return buildPythonLeetCodeWrapper(code, questionId, config.methodName);
+    }
+    if (language === "javascript") {
+        return buildJavascriptLeetCodeWrapper(code, questionId, config.methodName);
+    }
+    if (language === "cpp") {
+        if (hasCppMainFunction(code)) {
+            return code;
+        }
+        return buildCppLeetCodeWrapper(code, questionId, config.methodName);
+    }
+    return code;
+};
 const ALLOWED_CODING_LANGUAGES = new Set(["python", "javascript", "cpp"]);
 
 const ensureWalkinSummaryColumn = async () => {
@@ -607,8 +899,8 @@ const ensureWalkinSummaryColumn = async () => {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
         if (!duplicateColumn) {
@@ -628,8 +920,8 @@ const ensureWalkinAttemptedAtColumn = async () => {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
         if (!duplicateColumn) {
@@ -640,25 +932,42 @@ const ensureWalkinAttemptedAtColumn = async () => {
     }
 };
 
+const ensureWalkinSubmissionColumns = async () => {
+    if (walkinSubmissionColumnsChecked) return;
+    const columns = [
+        { name: "submission_mode", definition: "VARCHAR(20) NOT NULL DEFAULT 'MANUAL'" },
+        { name: "submission_reason", definition: "VARCHAR(40) NOT NULL DEFAULT 'MANUAL'" }
+    ];
+    for (const column of columns) {
+        try {
+            await queryAsync(
+                `ALTER TABLE walkin_final_results
+                 ADD COLUMN ${column.name} ${column.definition}`
+            );
+        } catch (error) {
+            const msg = String(error?.message || "");
+            
+                const duplicateColumn = Number(error?.errno) === 1060 ||
+                String(error?.code || "").toUpperCase() === "42701" ||
+                /duplicate column/i.test(msg) ||
+                /already exists/i.test(msg);
+            if (!duplicateColumn) {
+                console.warn(`Could not add ${column.name} column to walkin_final_results:`, msg);
+            }
+        }
+    }
+    walkinSubmissionColumnsChecked = true;
+};
+
 const ensureRegularStudentExamTable = async () => {
     if (regularStudentExamTableChecked) return;
-    await queryAsync(
-        `CREATE TABLE IF NOT EXISTS regular_student_exam (
-            student_exam_id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            student_id INT NOT NULL,
-            exam_id INT NOT NULL,
-            started_at TIMESTAMP NULL,
-            CONSTRAINT uq_regular_student_exam UNIQUE (student_id, exam_id)
-        )`
-    );
+    
     try {
-        await queryAsync(
-            `ALTER TABLE regular_student_exam ADD COLUMN started_at TIMESTAMP NULL`
-        );
+        
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
             String(error?.code || "").toUpperCase() === "42701" ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
@@ -669,44 +978,11 @@ const ensureRegularStudentExamTable = async () => {
     regularStudentExamTableChecked = true;
 };
 
-const ensureRegularExamFeedbackTable = async () => {
-    if (regularExamFeedbackTableChecked) return;
-    await queryAsync(
-        `CREATE TABLE IF NOT EXISTS regular_exam_feedback (
-            feedback_id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            student_id INT NOT NULL,
-            exam_id INT NOT NULL,
-            question_text TEXT NULL,
-            feedback_text TEXT NOT NULL,
-            submission_mode VARCHAR(20) NOT NULL DEFAULT 'MANUAL',
-            submitted_at TIMESTAMP NOT NULL DEFAULT NOW(),
-            CONSTRAINT uq_regular_exam_feedback UNIQUE (student_id, exam_id)
-        )`
-    );
-    regularExamFeedbackTableChecked = true;
-};
+const ensureRegularExamFeedbackTable = async () => { return; };
 
-const ensureResultsSubmittedAtColumn = async () => {
-    if (resultsSubmittedAtColumnChecked) return;
-    try {
-        await queryAsync(
-            `ALTER TABLE regular_student_results
-             ADD COLUMN submitted_at TIMESTAMP NULL`
-        );
-    } catch (error) {
-        const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
-            String(error?.code || "").toUpperCase() === "42701" ||
-            /duplicate column/i.test(msg) ||
-            /already exists/i.test(msg);
-        if (!duplicateColumn) {
-            console.warn("Could not add submitted_at column to regular_student_results:", msg);
-        }
-    } finally {
-        resultsSubmittedAtColumnChecked = true;
-    }
-};
+const ensureResultsSubmittedAtColumn = async () => { return; };
+
+const ensureResultsSubmissionColumns = async () => { return; };
 
 const ensureResultsFeedbackColumns = async () => {
     if (resultsFeedbackColumnsChecked) return;
@@ -717,14 +993,11 @@ const ensureResultsFeedbackColumns = async () => {
     ];
     for (const column of columns) {
         try {
-            await queryAsync(
-                `ALTER TABLE regular_student_results
-                 ADD COLUMN ${column.name} ${column.definition}`
-            );
+            
         } catch (error) {
             const msg = String(error?.message || "");
-            const duplicateColumn =
-                Number(error?.errno) === 1060 ||
+            
+                const duplicateColumn = Number(error?.errno) === 1060 ||
                 String(error?.code || "").toUpperCase() === "42701" ||
                 /duplicate column/i.test(msg) ||
                 /already exists/i.test(msg);
@@ -753,8 +1026,8 @@ const ensureWalkinStudentExamTable = async () => {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
             String(error?.code || "").toUpperCase() === "42701" ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
@@ -774,8 +1047,8 @@ const ensureWalkinAnswerSectionColumn = async () => {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
         if (!duplicateColumn) {
@@ -795,8 +1068,8 @@ const ensureWalkinAnswerSubmittedColumn = async () => {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
             String(error?.code || "").toUpperCase() === "42701" ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
@@ -805,6 +1078,28 @@ const ensureWalkinAnswerSubmittedColumn = async () => {
         }
     } finally {
         walkinAnswerSubmittedColumnChecked = true;
+    }
+};
+
+const ensureWalkinAnswerCodingLanguageColumn = async () => {
+    if (walkinAnswerCodingLanguageColumnChecked) return;
+    try {
+        await queryAsync(
+            `ALTER TABLE walkin_student_answers
+             ADD COLUMN coding_language VARCHAR(20) NULL`
+        );
+    } catch (error) {
+        const msg = String(error?.message || "");
+        
+            const duplicateColumn = Number(error?.errno) === 1060 ||
+            String(error?.code || "").toUpperCase() === "42701" ||
+            /duplicate column/i.test(msg) ||
+            /already exists/i.test(msg);
+        if (!duplicateColumn) {
+            console.warn("Could not add coding_language column to walkin_student_answers:", msg);
+        }
+    } finally {
+        walkinAnswerCodingLanguageColumnChecked = true;
     }
 };
 
@@ -818,10 +1113,6 @@ const isExamSubmitted = async (studentId, examId, { walkin = false } = {}) => {
         return statusLabel === "INACTIVE";
     }
 
-    const rows = await queryAsync(
-        `SELECT result_id FROM regular_student_results WHERE student_id = ? AND exam_id = ? LIMIT 1`,
-        [studentId, examId]
-    );
     return Boolean(rows && rows.length > 0);
 };
 
@@ -894,7 +1185,7 @@ const normalizeWalkinStoredQuestionType = (value = "") => {
 const mapWalkinRowsToAnswers = (rows = []) => {
     return (Array.isArray(rows) ? rows : []).map((row) => {
         const rawType = String(row?.question_type || "").trim().toUpperCase();
-        const mappedType =
+        
             rawType === "DESCRIPTIVE" ? "DESCRIPTIVE"
                 : rawType === "CODING" ? "CODING"
                     : "MCQ";
@@ -905,7 +1196,7 @@ const mapWalkinRowsToAnswers = (rows = []) => {
             selected_option: row?.selected_option || null,
             descriptive_answer: row?.descriptive_answer || null,
             code: row?.code || null,
-            coding_language: "",
+            coding_language: String(row?.coding_language || "").trim().toLowerCase(),
             testcases_passed: Number(row?.testcases_passed || 0),
             testcases_total: Number(row?.testcases_total || 0)
         };
@@ -920,30 +1211,30 @@ const normalizeAutosaveAnswers = (answers = []) => {
 
         const qType = String(answer?.question_type || "MCQ").trim().toUpperCase() || "MCQ";
         const sectionName = String(answer?.section_name || "").trim() || null;
-        const codingLanguage =
+        
             qType === "CODING"
                 ? String(answer?.coding_language || "").trim().toLowerCase()
                 : "";
-        const selectedOption =
+        
             qType === "MCQ"
                 ? String(answer?.selected_option || "").trim().toUpperCase().charAt(0) || null
                 : null;
-        const descriptiveAnswer =
+        
             qType === "DESCRIPTIVE"
                 ? String(answer?.descriptive_answer || "")
                 : null;
-        const codePayload =
+        
             qType === "CODING"
                 ? String(answer?.code || "")
                 : null;
 
         const parsedPassed = Number(answer?.testcases_passed);
         const parsedTotal = Number(answer?.testcases_total);
-        const testcasesPassed =
+        
             qType === "CODING" && Number.isFinite(parsedPassed)
                 ? parsedPassed
                 : null;
-        const testcasesTotal =
+        
             qType === "CODING" && Number.isFinite(parsedTotal)
                 ? parsedTotal
                 : null;
@@ -964,10 +1255,16 @@ const normalizeAutosaveAnswers = (answers = []) => {
     return Array.from(deduped.values());
 };
 
-const runWalkinPostSubmitProcessing = async (studentId, examId) => {
+const runWalkinPostSubmitProcessing = async (studentId, examId, submissionMeta = {}) => {
     await ensureWalkinSummaryColumn();
     await ensureWalkinAttemptedAtColumn();
+    await ensureWalkinSubmissionColumns();
     await ensureWalkinAnswerSubmittedColumn();
+    const submissionReason = normalizeSubmissionReason(
+        String(submissionMeta?.mode || "").toUpperCase() === "AUTO_SUBMIT",
+        submissionMeta?.reason
+    );
+    const submissionMode = getSubmissionMode(submissionReason);
 
     const gradingRows = await queryAsync(
         `
@@ -1137,7 +1434,7 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
         `SELECT student_id, name, course FROM students WHERE student_id = ? LIMIT 1`,
         [studentId]
     );
-    const studentProfile =
+    
         studentProfileRows[0] || { student_id: studentId, name: "Student", course: "" };
     const summaryPayload = await generateWalkinPerformanceSummary(studentProfile, walkinSummaryRows);
     const performanceSummary = String(summaryPayload?.summary || "");
@@ -1154,8 +1451,8 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
     try {
         await queryAsync(
             `INSERT INTO walkin_final_results
-            (student_id, exam_id, aptitude_marks, technical_marks, coding_easy_marks, coding_medium_marks, coding_hard_marks, total_marks, performance_summary, attempted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            (student_id, exam_id, aptitude_marks, technical_marks, coding_easy_marks, coding_medium_marks, coding_hard_marks, total_marks, performance_summary, attempted_at, submission_mode, submission_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)
             ON CONFLICT (student_id, exam_id) DO UPDATE SET
               aptitude_marks = EXCLUDED.aptitude_marks,
               technical_marks = EXCLUDED.technical_marks,
@@ -1164,7 +1461,15 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
               coding_hard_marks = EXCLUDED.coding_hard_marks,
               total_marks = EXCLUDED.total_marks,
               performance_summary = EXCLUDED.performance_summary,
-              attempted_at = COALESCE(walkin_final_results.attempted_at, EXCLUDED.attempted_at)`,
+              attempted_at = COALESCE(walkin_final_results.attempted_at, EXCLUDED.attempted_at),
+              submission_mode = CASE
+                WHEN EXCLUDED.submission_reason = 'MANUAL' THEN COALESCE(walkin_final_results.submission_mode, EXCLUDED.submission_mode)
+                ELSE EXCLUDED.submission_mode
+              END,
+              submission_reason = CASE
+                WHEN EXCLUDED.submission_reason = 'MANUAL' THEN COALESCE(walkin_final_results.submission_reason, EXCLUDED.submission_reason)
+                ELSE EXCLUDED.submission_reason
+              END`,
             [
                 studentId,
                 examId,
@@ -1174,7 +1479,9 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
                 Number(codingMediumMarksTotal || 0),
                 Number(codingHardMarksTotal || 0),
                 totalMarks,
-                performanceSummary
+                performanceSummary,
+                submissionMode,
+                submissionReason
             ]
         );
     } catch (insertError) {
@@ -1184,8 +1491,8 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
         }
         await queryAsync(
             `INSERT INTO walkin_final_results
-            (student_id, exam_id, aptitude_marks, technical_marks, coding_easy_marks, coding_medium_marks, coding_hard_marks, total_marks, attempted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            (student_id, exam_id, aptitude_marks, technical_marks, coding_easy_marks, coding_medium_marks, coding_hard_marks, total_marks, attempted_at, submission_mode, submission_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?, ?)
             ON CONFLICT (student_id, exam_id) DO UPDATE SET
               aptitude_marks = EXCLUDED.aptitude_marks,
               technical_marks = EXCLUDED.technical_marks,
@@ -1193,7 +1500,15 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
               coding_medium_marks = EXCLUDED.coding_medium_marks,
               coding_hard_marks = EXCLUDED.coding_hard_marks,
               total_marks = EXCLUDED.total_marks,
-              attempted_at = COALESCE(walkin_final_results.attempted_at, EXCLUDED.attempted_at)`,
+              attempted_at = COALESCE(walkin_final_results.attempted_at, EXCLUDED.attempted_at),
+              submission_mode = CASE
+                WHEN EXCLUDED.submission_reason = 'MANUAL' THEN COALESCE(walkin_final_results.submission_mode, EXCLUDED.submission_mode)
+                ELSE EXCLUDED.submission_mode
+              END,
+              submission_reason = CASE
+                WHEN EXCLUDED.submission_reason = 'MANUAL' THEN COALESCE(walkin_final_results.submission_reason, EXCLUDED.submission_reason)
+                ELSE EXCLUDED.submission_reason
+              END`,
             [
                 studentId,
                 examId,
@@ -1202,7 +1517,9 @@ const runWalkinPostSubmitProcessing = async (studentId, examId) => {
                 Number(codingEasyMarksTotal || 0),
                 Number(codingMediumMarksTotal || 0),
                 Number(codingHardMarksTotal || 0),
-                totalMarks
+                totalMarks,
+                submissionMode,
+                submissionReason
             ]
         );
     }
@@ -1257,7 +1574,7 @@ router.post("/start", async (req, res) => {
                     [studentId, examId]
                 );
             } catch (insertError) {
-                const duplicate =
+                
                     Number(insertError?.errno) === 1062 ||
                     String(insertError?.code || "").toUpperCase() === "23505" ||
                     /duplicate key/i.test(String(insertError?.message || ""));
@@ -1377,10 +1694,7 @@ router.get("/duration/:examId", async (req, res) => {
             const streamCode = normalizeWalkinStream(walkinRows?.[0]?.stream);
             return res.json({ success: true, durationMinutes: getWalkinDurationMinutes(streamCode) });
         }
-        const rows = await queryAsync(
-            `SELECT duration_minutes, start_at FROM regular_exams WHERE exam_id = ? LIMIT 1`,
-            [examId]
-        );
+        
         const exam = rows?.[0] || null;
         return res.json({
             success: true,
@@ -1459,14 +1773,7 @@ router.get("/attempted/:studentId/:examId", (req, res) => {
         );
     }
 
-    db.query(
-        `SELECT result_id FROM regular_student_results WHERE student_id = ? AND exam_id = ?`,
-        [req.params.studentId, req.params.examId],
-        (err3, rows3) => {
-            if (err3) return res.json({ attempted: false });
-            return res.json({ attempted: rows3.length > 0 });
-        }
-    );
+    return res.json({ attempted: false });
 });
 
 /* ================= FETCH regular_exam_questions ================= */
@@ -1546,34 +1853,6 @@ router.get("/regular_exam_questions/:examId", (req, res) => {
                     }
                     throw questionSetError;
                 }
-                const rows = await queryAsync(
-                    `
-                    SELECT 
-                        q.*,
-                        wc.testcases,
-                        wc.examples,
-                        COALESCE(wc.marks, ws.marks, wa.marks, 1) AS marks
-                    FROM regular_exam_questions q
-                    LEFT JOIN walkin_coding_questions wc ON wc.question_id = q.question_id
-                    LEFT JOIN walkin_stream_questions ws ON ws.question_id = q.question_id
-                    LEFT JOIN walkin_aptitude_questions wa ON wa.question_id = q.question_id
-                    WHERE q.exam_id = ?
-                      AND q.question_set_id = ?
-                      AND (
-                          UPPER(COALESCE(q.section_name, '')) = 'APTITUDE'
-                          OR UPPER(COALESCE(q.section_name, '')) = UPPER(COALESCE(?, q.section_name))
-                          OR UPPER(COALESCE(q.section_name, '')) NOT IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED')
-                      )
-                    ORDER BY
-                        CASE
-                            WHEN UPPER(COALESCE(q.section_name, '')) = 'APTITUDE' THEN 1
-                            WHEN UPPER(COALESCE(q.section_name, '')) IN ('TECHNICAL_BASIC', 'TECHNICAL_ADVANCED') THEN 2
-                            ELSE 3
-                        END,
-                        q.question_id
-                    `,
-                    [req.params.examId, questionSetId, allowedTechnicalSection || null]
-                );
                 return res.json(rows || []);
             } catch (error) {
                 console.error("Fetch regular_exam_questions error:", error);
@@ -1748,7 +2027,8 @@ router.get("/walkin-streams", (req, res) => {
                 WHEN 'data analytics' THEN 2
                 WHEN 'mern' THEN 3
                 WHEN 'agentic ai' THEN 4
-                ELSE 5
+                WHEN 'interns test' THEN 5
+                ELSE 6
             END,
             stream
         `,
@@ -1757,7 +2037,16 @@ router.get("/walkin-streams", (req, res) => {
                 console.error("Walkin streams error:", err);
                 return res.json([]);
             }
-            res.json(Array.isArray(rows) ? rows : []);
+            const configuredStreams = Object.values(STREAM_BY_CODE).map((stream) => ({ stream }));
+            const combined = [...configuredStreams, ...(Array.isArray(rows) ? rows : [])];
+            const seen = new Set();
+            const unique = combined.filter((row) => {
+                const key = String(row?.stream || "").trim().toLowerCase();
+                if (!key || seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+            res.json(unique);
         }
     );
 });
@@ -1769,6 +2058,7 @@ router.post("/run-code", async (req, res) => {
 
     const requestedLanguage = String(req.body?.language || "").trim().toLowerCase();
     const { code } = req.body || {};
+    const questionId = Number(req.body?.questionId || 0);
     if (!requestedLanguage || !code) {
         return res.status(400).json({ success: false, message: "Missing language or code" });
     }
@@ -1779,23 +2069,41 @@ router.post("/run-code", async (req, res) => {
         });
     }
 
-    const testcases = Array.isArray(req.body.testcases)
-        ? req.body.testcases.slice(0, MAX_CODING_TESTCASES)
-        : [];
+    let testcases = [];
+    if (questionId) {
+        try {
+            const rows = await queryAsync(
+                `SELECT testcases FROM walkin_coding_questions WHERE question_id = ?`,
+                [questionId]
+            );
+            if (rows.length && rows[0].testcases) {
+                const parsed = typeof rows[0].testcases === "string"
+                    ? JSON.parse(rows[0].testcases)
+                    : rows[0].testcases;
+                testcases = Array.isArray(parsed) ? parsed.slice(0, MAX_CODING_TESTCASES) : [];
+            }
+        } catch (tcErr) {
+            console.warn("Could not load testcases for question", questionId, tcErr.message);
+        }
+    }
     try {
+        const executableCode = buildLeetCodeWrappedCode(requestedLanguage, code, questionId);
         if (testcases.length) {
-            const regular_student_results = [];
+            const execution_results = [];
             for (const testcase of testcases) {
-                const testcaseInput = JSON.stringify(testcase.input || "");
-                const result = await runCodeWithRunner(requestedLanguage, code, testcaseInput);
-                const stdoutNormalized = result.stdout?.trim() || "";
+                
+                    testcase.input === null || testcase.input === undefined
+                        ? ""
+                        : String(testcase.input);
+                const result = await runCodeWithRunner(requestedLanguage, executableCode, testcaseInput);
+                const stdoutNormalized = normalizeOutputForComparison(result.stdout, questionId);
                 const expectedValue = testcase.expected_output;
-                const expectedNormalized =
+                
                     expectedValue === null || expectedValue === undefined
                         ? ""
-                        : String(expectedValue).trim();
+                        : normalizeOutputForComparison(expectedValue, questionId);
 
-                regular_student_results.push({
+                execution_results.push({
                     input: testcase.input,
                     expected_output: testcase.expected_output,
                     stdout: result.stdout,
@@ -1805,16 +2113,16 @@ router.post("/run-code", async (req, res) => {
                 });
             }
 
-            const passedCount = regular_student_results.filter((r) => r.passed).length;
+            const passedCount = execution_results.filter((r) => r.passed).length;
             return res.json({
                 success: true,
-                testResults: regular_student_results,
-                total: regular_student_results.length,
+                testResults: execution_results,
+                total: execution_results.length,
                 passed: passedCount
             });
         }
 
-        const result = await runCodeWithRunner(requestedLanguage, code, req.body.input || "");
+        const result = await runCodeWithRunner(requestedLanguage, executableCode, req.body.input || "");
         return res.json({
             success: true,
             stdout: result.stdout,
@@ -1838,8 +2146,10 @@ router.get("/draft/:examId", async (req, res) => {
         const isWalkinExam = isWalkinSessionStudent(req);
         if (isWalkinExam) {
             await ensureWalkinAnswerSubmittedColumn();
+            await ensureWalkinAnswerCodingLanguageColumn();
             const rows = await queryAsync(
                 `SELECT question_id, section_name, question_type, selected_option, descriptive_answer, code,
+                        coding_language,
                         testcases_passed, 0 AS testcases_total, submission_id AS updated_at
                  FROM walkin_student_answers
                  WHERE student_id = ? AND exam_id = ? AND is_submitted = FALSE
@@ -1901,24 +2211,26 @@ router.post("/draft/autosave", async (req, res) => {
         if (isWalkinExam) {
             await ensureWalkinAnswerSectionColumn();
             await ensureWalkinAnswerSubmittedColumn();
+            await ensureWalkinAnswerCodingLanguageColumn();
             await db.withTransaction(async (txQuery) => {
                 for (const answer of normalizedAnswers) {
                     const sectionLabel = normalizeWalkinSectionLabel(answer.sectionName, answer.qType);
                     const storedQuestionType = normalizeWalkinStoredQuestionType(answer.qType);
-                    const passCountForStore =
+                    
                         storedQuestionType === "Coding" && Number.isFinite(Number(answer.testcasesPassed))
                             ? Math.max(0, Number(answer.testcasesPassed))
                             : 0;
                     await txQuery(
                         `INSERT INTO walkin_student_answers
-                         (student_id, exam_id, question_id, section_name, question_type, selected_option, descriptive_answer, code, testcases_passed, marks_obtained, is_submitted)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)
+                         (student_id, exam_id, question_id, section_name, question_type, selected_option, descriptive_answer, code, coding_language, testcases_passed, marks_obtained, is_submitted)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)
                          ON CONFLICT (student_id, exam_id, question_id, question_type)
                          DO UPDATE SET
                             section_name = EXCLUDED.section_name,
                             selected_option = EXCLUDED.selected_option,
                             descriptive_answer = EXCLUDED.descriptive_answer,
                             code = EXCLUDED.code,
+                            coding_language = EXCLUDED.coding_language,
                             testcases_passed = EXCLUDED.testcases_passed,
                             marks_obtained = 0,
                             is_submitted = FALSE`,
@@ -1931,6 +2243,7 @@ router.post("/draft/autosave", async (req, res) => {
                             answer.selectedOption,
                             answer.descriptiveAnswer,
                             answer.codePayload,
+                            answer.codingLanguage,
                             passCountForStore,
                             0
                         ]
@@ -1994,9 +2307,8 @@ router.post("/submit", async (req, res) => {
     let submittedAnswers = Array.isArray(answers) ? answers : [];
     let walkinLoadedFromLiveRows = false;
     const requestedForceSubmit = Boolean(req.body?.forceSubmit);
-    const requestedForceReason = String(req.body?.forceReason || "").trim().toUpperCase();
-    const isViolationAutoSubmit = requestedForceSubmit && requestedForceReason === "VIOLATION_LIMIT";
-    let autoSubmitReason = isViolationAutoSubmit ? "VIOLATION_LIMIT" : null;
+    const requestedSubmissionReason = normalizeSubmissionReason(requestedForceSubmit, req.body?.forceReason);
+    let autoSubmitReason = requestedSubmissionReason === "MANUAL" ? null : requestedSubmissionReason;
 
     if (String(studentId) !== String(req.session.student.studentId)) {
         return res.status(403).json({ success: false, message: "Forbidden" });
@@ -2017,7 +2329,7 @@ router.post("/submit", async (req, res) => {
             .trim()
             .toUpperCase()
             .replace(/[\s-]/g, "_");
-        const isWalkin =
+        
             normalizedStudentType === "WALKIN" || normalizedStudentType === "WALK_IN";
         const walkinExamRows = isWalkin
             ? await queryAsync(
@@ -2037,8 +2349,9 @@ router.post("/submit", async (req, res) => {
         if (!submittedAnswers || submittedAnswers.length === 0) {
             if (isWalkin && isWalkinExamId) {
                 await ensureWalkinAnswerSubmittedColumn();
+                await ensureWalkinAnswerCodingLanguageColumn();
                 const liveRows = await queryAsync(
-                    `SELECT question_id, section_name, question_type, selected_option, descriptive_answer, code, testcases_passed
+                    `SELECT question_id, section_name, question_type, selected_option, descriptive_answer, code, coding_language, testcases_passed
                      FROM walkin_student_answers
                      WHERE student_id = ? AND exam_id = ? AND is_submitted = FALSE
                      ORDER BY submission_id DESC`,
@@ -2051,7 +2364,7 @@ router.post("/submit", async (req, res) => {
             }
         }
         if (!submittedAnswers || submittedAnswers.length === 0) {
-            const allowEmptyWalkinAutoSubmit =
+            
                 isWalkin && isWalkinExamId && (autoSubmitReason === "TIME_OVER" || autoSubmitReason === "VIOLATION_LIMIT");
             const allowEmptyRegularSubmit = !isWalkin;
             if (!allowEmptyWalkinAutoSubmit && !allowEmptyRegularSubmit) {
@@ -2097,6 +2410,7 @@ router.post("/submit", async (req, res) => {
         let regularQuestionSetId = null;
         let walkinExpiredBeyondGrace = false;
         if (!isWalkin) {
+            
             const regularStudentRows = await queryAsync(
                 `SELECT status, college_id
                  FROM students
@@ -2178,7 +2492,7 @@ router.post("/submit", async (req, res) => {
                     [studentId, examIdNum]
                 );
             } catch (insertError) {
-                const duplicate =
+                
                     Number(insertError?.errno) === 1062 ||
                     String(insertError?.code || "").toUpperCase() === "23505" ||
                     /duplicate key/i.test(String(insertError?.message || ""));
@@ -2213,9 +2527,10 @@ router.post("/submit", async (req, res) => {
                     walkinExpiredBeyondGrace = true;
                     autoSubmitReason = "TIME_OVER";
                     await ensureWalkinAnswerSubmittedColumn();
+                    await ensureWalkinAnswerCodingLanguageColumn();
                     const liveRows = await queryAsync(
                         `SELECT question_id, section_name, question_type, selected_option, descriptive_answer, code,
-                                testcases_passed
+                                coding_language, testcases_passed
                          FROM walkin_student_answers
                          WHERE student_id = ? AND exam_id = ? AND is_submitted = FALSE
                          ORDER BY submission_id DESC`,
@@ -2235,15 +2550,7 @@ router.post("/submit", async (req, res) => {
                 const stream = String(walkinExamRows?.[0]?.stream || "");
                 codingDisabledForWalkin = !isWalkinCodingEnabled(stream);
             } else {
-                const examRows = await queryAsync(
-                `
-                SELECT course
-                FROM regular_exams
-                WHERE exam_id = ?
-                LIMIT 1
-                `,
-                [examId]
-                );
+                
                 const course = String(examRows?.[0]?.course || "").trim();
                 codingDisabledForWalkin = !isWalkinCodingEnabled(course);
             }
@@ -2282,23 +2589,29 @@ router.post("/submit", async (req, res) => {
         if (isWalkin) {
             await ensureWalkinSummaryColumn();
             await ensureWalkinAttemptedAtColumn();
+            await ensureWalkinSubmissionColumns();
             await ensureWalkinAnswerSectionColumn();
             await ensureWalkinAnswerSubmittedColumn();
+            await ensureWalkinAnswerCodingLanguageColumn();
         }
+
+        const finalSubmissionReason = autoSubmitReason || "MANUAL";
+        const finalSubmissionMode = getSubmissionMode(finalSubmissionReason);
 
         await db.withTransaction(async (txQuery) => {
         const queryAsync = txQuery;
 
         const walkinSql = `
             INSERT INTO walkin_student_answers
-            (student_id, exam_id, question_id, section_name, question_type, selected_option, descriptive_answer, code, testcases_passed, marks_obtained, is_submitted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)
+            (student_id, exam_id, question_id, section_name, question_type, selected_option, descriptive_answer, code, coding_language, testcases_passed, marks_obtained, is_submitted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)
             ON CONFLICT (student_id, exam_id, question_id, question_type)
             DO UPDATE SET
                 section_name = EXCLUDED.section_name,
                 selected_option = EXCLUDED.selected_option,
                 descriptive_answer = EXCLUDED.descriptive_answer,
                 code = EXCLUDED.code,
+                coding_language = EXCLUDED.coding_language,
                 testcases_passed = EXCLUDED.testcases_passed,
                 marks_obtained = 0,
                 is_submitted = FALSE
@@ -2316,13 +2629,7 @@ router.post("/submit", async (req, res) => {
         }
 
         if (!isWalkin && regularQuestionSetId) {
-            await queryAsync(
-                `DELETE FROM regular_student_answers
-                 WHERE student_id = ?
-                   AND exam_id = ?
-                   AND question_set_id = ?`,
-                [studentId, examId, regularQuestionSetId]
-            );
+            
         }
 
         for (const a of submittedAnswers) {
@@ -2335,18 +2642,18 @@ router.post("/submit", async (req, res) => {
                     : sectionName.includes("aptitude")
                         ? "Aptitude"
                         : "Technical";
-                const storedQuestionType =
+                
                     questionType === "DESCRIPTIVE" ? "Descriptive" :
                     questionType === "CODING" ? "Coding" : "MCQ";
-                const selectedOption =
+                
                     questionType === "MCQ" && typeof a.selected_option === "string"
                         ? (a.selected_option.trim().toUpperCase().charAt(0) || null)
                         : null;
-                const descriptiveAnswer =
+                
                     questionType === "DESCRIPTIVE" && typeof a.descriptive_answer === "string"
                         ? a.descriptive_answer
                         : null;
-                const codePayload =
+                
                     questionType === "CODING" && typeof a.code === "string"
                         ? a.code
                         : null;
@@ -2368,6 +2675,7 @@ router.post("/submit", async (req, res) => {
                     selectedOption,
                     descriptiveAnswer,
                     codePayload,
+                    String(a.coding_language || "").trim().toLowerCase() || null,
                     passCountForStore,
                     0
                 ]);
@@ -2387,18 +2695,10 @@ router.post("/submit", async (req, res) => {
         }
 
         if (!isWalkin) {
-            await ensureResultsSubmittedAtColumn();
-            await queryAsync(
-                `DELETE FROM regular_student_results
-                 WHERE student_id = ?
-                   AND exam_id = ?`,
-                [studentId, examId]
-            );
-            await queryAsync(
-                `INSERT INTO regular_student_results (student_id, exam_id, attempt_status, submitted_at, question_set_id)
-                 VALUES (?, ?, 'SUBMITTED', NOW(), ?)`,
-                [studentId, examId, regularQuestionSetId]
-            );
+            
+            
+            
+            
         }
         await queryAsync(
             `UPDATE students
@@ -2421,13 +2721,19 @@ router.post("/submit", async (req, res) => {
         let walkinResultProcessing = false;
         if (isWalkin) {
             try {
-                await runWalkinPostSubmitProcessing(Number(studentId), Number(effectiveExamIdNum));
+                await runWalkinPostSubmitProcessing(Number(studentId), Number(effectiveExamIdNum), {
+                    mode: finalSubmissionMode,
+                    reason: finalSubmissionReason
+                });
             } catch (postProcessError) {
                 walkinResultProcessing = true;
                 console.error("Walk-in post-submit processing error:", postProcessError);
                 setImmediate(async () => {
                     try {
-                        await runWalkinPostSubmitProcessing(Number(studentId), Number(effectiveExamIdNum));
+                        await runWalkinPostSubmitProcessing(Number(studentId), Number(effectiveExamIdNum), {
+                            mode: finalSubmissionMode,
+                            reason: finalSubmissionReason
+                        });
                     } catch (retryError) {
                         console.error("Walk-in post-submit processing retry error:", retryError);
                     }
@@ -2445,8 +2751,9 @@ router.post("/submit", async (req, res) => {
                         : "Exam submitted successfully"),
             studentExamId: effectiveStudentExamId,
             examId: isWalkin ? Number(effectiveExamIdNum) : Number(examIdNum),
-            autoSubmitted: Boolean(autoSubmitReason),
-            reason: autoSubmitReason,
+            autoSubmitted: finalSubmissionMode === "AUTO_SUBMIT",
+            submissionMode: finalSubmissionMode,
+            reason: finalSubmissionReason,
             resultProcessing: walkinResultProcessing
         });
     } catch (error) {
@@ -2524,46 +2831,18 @@ router.post("/feedback", async (req, res) => {
             return res.json({ success: true });
         }
 
-        const regularExamRows = await queryAsync(
-            `SELECT exam_id
-             FROM regular_exams
-             WHERE exam_id = ?
-             LIMIT 1`,
-            [examId]
-        );
+        
         if (!regularExamRows?.length) {
             return res.status(400).json({ success: false, message: "Invalid exam id." });
         }
 
-        const submittedRows = await queryAsync(
-            `SELECT 1
-             FROM regular_student_results
-             WHERE student_id = ?
-               AND exam_id = ?
-             LIMIT 1`,
-            [studentId, examId]
-        );
+        
         if (!submittedRows?.length) {
             return res.status(400).json({ success: false, message: "Feedback can be submitted only after exam submission." });
         }
 
         await ensureResultsFeedbackColumns();
-        await queryAsync(
-            `UPDATE regular_student_results
-             SET feedback_question_text = ?,
-                 feedback_text = ?,
-                 feedback_submission_mode = ?
-             WHERE student_id = ?
-               AND exam_id = ?`,
-            [
-                questionText || "Tell us about the exam, question quality, and overall difficulty.",
-                feedbackText,
-                submissionMode
-                ,
-                studentId,
-                examId
-            ]
-        );
+        
 
         return res.json({ success: true });
     } catch (error) {
@@ -2630,7 +2909,7 @@ router.post("/result", (req, res) => {
                         );
 
                         const summaryText = String(rows?.[0]?.performance_summary || "");
-                        const needsFinalize =
+                        
                             rows?.length &&
                             /provisional summary generated at submission time/i.test(summaryText);
                         if (needsFinalize) {
@@ -2672,7 +2951,7 @@ router.post("/result", (req, res) => {
                             [streamQuestionKey, streamCodeCompact, streamLabelCompact]
                         );
                         const maxMarks = Number(maxRows?.[0]?.max_marks || 0);
-                        const scorePercent =
+                        
                             maxMarks > 0 ? Number(((totalMarks / maxMarks) * 100).toFixed(2)) : null;
                         return res.json({
                             success: true,
@@ -2695,18 +2974,15 @@ router.post("/result", (req, res) => {
     db.query(
         `
         SELECT s.background_type,
-               COALESCE(r.question_set_id, rse.question_set_id) AS question_set_id
+               COALESCE(rse.question_set_id, 0) AS question_set_id
         FROM students s
-        LEFT JOIN regular_student_results r
-          ON r.student_id = s.student_id
-         AND r.exam_id = ?
         LEFT JOIN regular_student_exam rse
           ON rse.student_id = s.student_id
          AND rse.exam_id = ?
         WHERE s.student_id = ?
         LIMIT 1
         `,
-        [examId, examId, studentId],
+        [examId, studentId],
         (bgErr, bgRows) => {
             if (bgErr) {
                 console.error("Result background error:", bgErr);
@@ -2775,6 +3051,23 @@ router.post("/result", (req, res) => {
         }
     );
 });
+
+const runExamStartupSchemaSync = async () => {
+    await queryAsync(`SELECT 1`);
+    await ensureWalkinSummaryColumn();
+    await ensureWalkinAttemptedAtColumn();
+    await ensureWalkinSubmissionColumns();
+    await ensureRegularStudentExamTable();
+    
+    
+    
+    await ensureResultsFeedbackColumns();
+    await ensureWalkinStudentExamTable();
+    await ensureWalkinAnswerSectionColumn();
+    await ensureWalkinAnswerSubmittedColumn();
+};
+
+router.startupSchemaSync = runExamStartupSchemaSync;
 
 module.exports = router;
 

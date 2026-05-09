@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
+    "regression:coding": "node scripts/coding-judge-regression.js",
     "smoke:regular": "node scripts/smoke-regular-e2e.js",
     "smoke:walkin": "node scripts/smoke-walkin-regression.js"
   },

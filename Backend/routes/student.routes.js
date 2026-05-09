@@ -8,6 +8,7 @@ const getWalkinDurationMinutes = (streamCode) => {
     if (streamCode === "DS") return 60;
     if (streamCode === "DA") return 50;
     if (streamCode === "AAI") return 60;
+    if (streamCode === "INT") return 90;
     return 80; // MERN default
 };
 
@@ -43,6 +44,10 @@ function runStudentStartupSchemaSync() {
 }
 
 runStudentStartupSchemaSync();
+
+router.startupSchemaSync = async () => {
+    runStudentStartupSchemaSync();
+};
 
 /* =================================================
    AUTH
@@ -242,54 +247,7 @@ router.get("/exams/:studentId", (req, res) => {
                 );
             }
 
-            const sql = `
-                SELECT 
-                    e.exam_id,
-                    'Regular Exam' AS exam_name,
-                    (e.start_at::timestamp)::date AS exam_start_date,
-                    (e.end_at::timestamp)::date AS exam_end_date,
-                    (e.start_at::timestamp)::time AS start_time,
-                    (e.end_at::timestamp)::time AS end_time,
-                    'Regular' AS course,
-                    CASE WHEN NOW() >= e.start_at THEN TRUE ELSE FALSE END AS can_start,
-                    GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (e.start_at - NOW()))))::int AS starts_in_seconds
-                FROM regular_exams e
-                JOIN students self
-                  ON self.student_id = ?
-                WHERE e.exam_status = 'READY'
-                  AND COALESCE(e.is_deleted, FALSE) = FALSE
-                  AND NOW() <= e.end_at
-                  AND (e.college_id = self.college_id OR e.college_id IS NULL)
-                  AND EXISTS (
-                      SELECT 1
-                      FROM regular_question_sets qs
-                      WHERE qs.exam_id = e.exam_id
-                        AND qs.set_status = 'ACTIVE'
-                  )
-                  AND EXISTS (
-                      SELECT 1
-                      FROM students s
-                      WHERE s.student_id = ?
-                        AND s.status = 'ACTIVE'
-                  )
-                  AND e.exam_status = 'READY'
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM regular_student_results r
-                      WHERE r.student_id = ?
-                        AND r.exam_id = e.exam_id
-                  )
-                ORDER BY e.start_at DESC NULLS LAST, e.exam_id DESC
-                LIMIT 1
-            `;
-
-            return db.query(sql, [studentId, studentId, studentId], (err6, rows) => {
-                if (err6) {
-                    console.error("Available exams error:", err6);
-                    return res.json([]);
-                }
-                return res.json(rows || []);
-            });
+            return res.json([]);
         }
     );
 });
@@ -345,25 +303,6 @@ router.get("/attempted-exams/:studentId", (req, res) => {
     const sql = `
         SELECT exam_id, exam_name, exam_start_date, exam_end_date, course, attempt_status
         FROM (
-            SELECT 
-                r.exam_id,
-                CASE
-                    WHEN we.walkin_exam_id IS NOT NULL THEN CONCAT(we.stream, ' Walk-in Exam')
-                    ELSE 'Regular Exam'
-                END AS exam_name,
-                NULL AS exam_start_date,
-                NULL AS exam_end_date,
-                COALESCE(we.stream, 'Regular') AS course,
-                r.attempt_status,
-                r.result_id AS sort_id
-            FROM regular_student_results r
-            JOIN students s ON s.student_id = r.student_id
-            LEFT JOIN regular_exams e ON e.exam_id = r.exam_id
-            LEFT JOIN walkin_exams we ON we.walkin_exam_id = r.exam_id
-            WHERE r.student_id = ?
-
-            UNION ALL
-
             SELECT
                 wfr.exam_id,
                 CONCAT(COALESCE(we.stream, s.course), ' Walk-in Exam') AS exam_name,
@@ -378,7 +317,7 @@ router.get("/attempted-exams/:studentId", (req, res) => {
             WHERE wfr.student_id = ?
         ) combined
         ORDER BY sort_id DESC
-    `;
+`;
 
     db.query(sql, [req.params.studentId, req.params.studentId], (err, rows) => {
         if (err) {

@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const router = express.Router();
 const db = require("../db");
 const util = require("util");
@@ -19,10 +19,12 @@ const WALKIN_STREAMS = Object.values(STREAM_BY_CODE);
 const isWalkinCourse = (value) => Boolean(getCanonicalWalkinStreamCode(value));
 let walkinAnswerSectionColumnChecked = false;
 let walkinAttemptedAtColumnChecked = false;
+let walkinSubmissionColumnsChecked = false;
 let walkinExamStreamCodeColumnChecked = false;
 let walkinTempStudentsTableChecked = false;
 let regularExamFeedbackTableChecked = false;
 let resultsSubmittedAtColumnChecked = false;
+let resultsSubmissionColumnsChecked = false;
 let adminStartupSchemaSyncAttempted = false;
 let regularExamCollegeColumnChecked = false;
 let regularQuestionBankTablesChecked = false;
@@ -60,7 +62,108 @@ const STREAM_LABEL_BY_CODE = {
     DS: "Data Science",
     DA: "Data Analytics",
     MERN: "MERN",
-    AAI: "Agentic AI"
+    AAI: "Agentic AI",
+    INT: "Interns Test"
+};
+
+const parseCodingTestcaseCount = (payload) => {
+    if (!payload) return 0;
+    try {
+        const parsed = typeof payload === "string" ? JSON.parse(payload) : payload;
+        return Array.isArray(parsed) ? Math.min(parsed.length, 5) : 0;
+    } catch {
+        return 0;
+    }
+};
+
+const buildWalkinSummaryRows = (answerRows = []) => {
+    return (answerRows || []).map((row) => {
+        const type = String(row.question_type || "").toUpperCase();
+        const explicitSection = String(row.section_name || "").trim().toUpperCase();
+        const isCoding = explicitSection === "CODING" || type === "CODING" || Boolean(row.coding_qid);
+        const isAptitude = explicitSection === "APTITUDE" || Boolean(row.aptitude_qid);
+        const sectionLabel = isCoding ? "Coding" : isAptitude ? "Aptitude" : "Technical";
+        return {
+            section_label: sectionLabel,
+            question_type: type === "DESCRIPTIVE" ? "Descriptive" : isCoding ? "Coding" : "MCQ",
+            marks_obtained: Number(row.marks_obtained || 0),
+            full_marks: Number(row.full_marks || 0),
+            coding_difficulty: String(row.coding_difficulty || ""),
+            testcases_passed: Number(row.testcases_passed || 0),
+            total_testcases: isCoding ? parseCodingTestcaseCount(row.coding_testcases) : 0,
+            question_text: String(row.question_text || ""),
+            descriptive_answer: String(row.descriptive_answer || ""),
+            reference_answer: String(row.reference_descriptive_answer || "")
+        };
+    });
+};
+
+const refreshWalkinPerformanceSummary = async (studentId, examId) => {
+    const sid = Number(studentId || 0);
+    const eid = Number(examId || 0);
+    if (!sid || !eid) return false;
+
+    const studentRows = await queryAsync(
+        `SELECT student_id, name, course FROM students WHERE student_id = ? LIMIT 1`,
+        [sid]
+    );
+    const student = studentRows?.[0] || { student_id: sid, name: "Student", course: "" };
+
+    const answerRows = await queryAsync(
+        `
+        SELECT
+            wsa.submission_id,
+            COALESCE(wsa.section_name, '') AS section_name,
+            UPPER(COALESCE(wsa.question_type::text, '')) AS question_type,
+            wsa.question_id,
+            COALESCE(wsa.descriptive_answer, '') AS descriptive_answer,
+            COALESCE(wsa.marks_obtained, 0) AS marks_obtained,
+            COALESCE(wsa.testcases_passed, 0) AS testcases_passed,
+            wa.question_id AS aptitude_qid,
+            wc.question_id AS coding_qid,
+            COALESCE(wa.marks, ws.marks, wc.marks, 0) AS full_marks,
+            COALESCE(wa.question_text, ws.question_text, wc.question_text, '') AS question_text,
+            COALESCE(ws.descriptive_answer, '') AS reference_descriptive_answer,
+            LOWER(COALESCE(wc.difficulty, '')) AS coding_difficulty,
+            wc.testcases AS coding_testcases
+        FROM walkin_student_answers wsa
+        JOIN (
+            SELECT MAX(submission_id) AS submission_id
+            FROM walkin_student_answers
+            WHERE student_id = ?
+              AND exam_id = ?
+            GROUP BY question_id, UPPER(COALESCE(question_type::text, '')), UPPER(COALESCE(section_name, ''))
+        ) latest ON latest.submission_id = wsa.submission_id
+        LEFT JOIN walkin_aptitude_questions wa
+            ON wa.question_id = wsa.question_id
+           AND UPPER(COALESCE(wsa.section_name, '')) = 'APTITUDE'
+        LEFT JOIN walkin_stream_questions ws
+            ON ws.question_id = wsa.question_id
+           AND UPPER(COALESCE(wsa.section_name, '')) = 'TECHNICAL'
+        LEFT JOIN walkin_coding_questions wc
+            ON wc.question_id = wsa.question_id
+           AND UPPER(COALESCE(wsa.section_name, '')) = 'CODING'
+        WHERE wsa.student_id = ?
+          AND wsa.exam_id = ?
+        ORDER BY wsa.submission_id
+        `,
+        [sid, eid, sid, eid]
+    );
+
+    const summaryRows = buildWalkinSummaryRows(answerRows);
+    const summaryPayload = await generateWalkinPerformanceSummary(student, summaryRows);
+    const summary = String(summaryPayload?.summary || "").trim();
+    if (!summary) return false;
+
+    await queryAsync(
+        `
+        UPDATE walkin_final_results
+        SET performance_summary = ?
+        WHERE student_id = ? AND exam_id = ?
+        `,
+        [summary, sid, eid]
+    );
+    return true;
 };
 
 const normalizeWalkinStreamLabel = (value) => {
@@ -84,37 +187,12 @@ const getRegularSectionNameForBackground = (backgroundType) =>
 const ensureRegularQuestionBankTables = async () => {
     if (regularQuestionBankTablesChecked) return;
 
-    await queryAsync(
-        `CREATE TABLE IF NOT EXISTS regular_aptitude_questions (
-            question_id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            question_text TEXT NOT NULL,
-            option_a TEXT NOT NULL,
-            option_b TEXT NOT NULL,
-            option_c TEXT NOT NULL,
-            option_d TEXT NOT NULL,
-            correct_answer VARCHAR(1) NOT NULL
-        )`
-    );
+    
 
-    await queryAsync(
-        `CREATE TABLE IF NOT EXISTS regular_technical_questions (
-            question_id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            question_text TEXT NOT NULL,
-            option_a TEXT NOT NULL,
-            option_b TEXT NOT NULL,
-            option_c TEXT NOT NULL,
-            option_d TEXT NOT NULL,
-            correct_answer VARCHAR(1) NOT NULL,
-            background_type TEXT NOT NULL,
-            section_name VARCHAR(128) NOT NULL DEFAULT 'TECHNICAL_BASIC',
-            question_type TEXT NOT NULL DEFAULT 'MCQ',
-            is_active BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )`
-    );
+    
 
     try {
-        await queryAsync(`ALTER TABLE regular_technical_questions ADD COLUMN background_type TEXT NOT NULL DEFAULT 'NON_TECH'`);
+        
     } catch (error) {
         const msg = String(error?.message || "");
         if (
@@ -127,7 +205,7 @@ const ensureRegularQuestionBankTables = async () => {
     }
 
     try {
-        await queryAsync(`ALTER TABLE regular_technical_questions ADD COLUMN section_name VARCHAR(128) NOT NULL DEFAULT 'TECHNICAL_BASIC'`);
+        
     } catch (error) {
         const msg = String(error?.message || "");
         if (
@@ -139,21 +217,11 @@ const ensureRegularQuestionBankTables = async () => {
         }
     }
 
-    await queryAsync(
-        `UPDATE regular_technical_questions
-         SET background_type = CASE
-             WHEN UPPER(REPLACE(TRIM(COALESCE(background_type, '')), '-', '_')) = 'TECH' THEN 'TECH'
-             ELSE 'NON_TECH'
-         END,
-         section_name = CASE
-             WHEN UPPER(REPLACE(TRIM(COALESCE(background_type, '')), '-', '_')) = 'TECH' THEN 'TECHNICAL_ADVANCED'
-             ELSE 'TECHNICAL_BASIC'
-         END`
-    );
+    
 
-    await queryAsync(`ALTER TABLE regular_aptitude_questions DROP COLUMN IF EXISTS question_type`);
-    await queryAsync(`ALTER TABLE regular_aptitude_questions DROP COLUMN IF EXISTS is_active`);
-    await queryAsync(`ALTER TABLE regular_aptitude_questions DROP COLUMN IF EXISTS created_at`);
+    
+    
+    
 
     regularQuestionBankTablesChecked = true;
 };
@@ -354,10 +422,7 @@ const ensureResultsFeedbackColumns = async () => {
     ];
     for (const column of columns) {
         try {
-            await queryAsync(
-                `ALTER TABLE regular_student_results
-                 ADD COLUMN ${column.name} ${column.definition}`
-            );
+            
         } catch (error) {
             const msg = String(error?.message || "");
             if (
@@ -371,15 +436,7 @@ const ensureResultsFeedbackColumns = async () => {
     }
 
     try {
-        await queryAsync(
-            `UPDATE regular_student_results rsr
-             SET feedback_text = COALESCE(rsr.feedback_text, ref.feedback_text),
-                 feedback_question_text = COALESCE(rsr.feedback_question_text, ref.question_text),
-                 feedback_submission_mode = COALESCE(rsr.feedback_submission_mode, ref.submission_mode)
-             FROM regular_exam_feedback ref
-             WHERE ref.student_id = rsr.student_id
-               AND ref.exam_id = rsr.exam_id`
-        );
+        
     } catch (error) {
         const msg = String(error?.message || "");
         if (String(error?.code || "").toUpperCase() !== "42P01" && !/does not exist/i.test(msg)) {
@@ -390,19 +447,14 @@ const ensureResultsFeedbackColumns = async () => {
     resultsFeedbackColumnsChecked = true;
 };
 
+const ensureResultsSubmissionColumns = async () => { return; };
+
 const getResolvedBackgroundType = async (course) => {
     const normalizedCourse = String(course || "").trim();
     if (!normalizedCourse) return null;
 
     try {
-        const rows = await queryAsync(
-            `SELECT background_type
-             FROM regular_course_stream_map
-             WHERE LOWER(TRIM(course_name)) = LOWER(TRIM(?))
-               AND is_active = TRUE
-             LIMIT 1`,
-            [normalizedCourse]
-        );
+        const rows = [];
         const mappedType = String(rows?.[0]?.background_type || "").trim().toUpperCase();
         if (mappedType === "TECH") return "TECH";
         if (mappedType === "NON_TECH") return "NON_TECH";
@@ -449,8 +501,7 @@ async function ensureWalkinAnswerSectionColumn() {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        const duplicateColumn = Number(error?.errno) === 1060 ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
         if (!duplicateColumn) {
@@ -461,17 +512,10 @@ async function ensureWalkinAnswerSectionColumn() {
     }
 }
 
-async function ensureRegularExamCollegeColumn() {
+async function dummy() { return; 
     if (regularExamCollegeColumnChecked) return;
     try {
-        const existingColumnRows = await queryAsync(
-            `SELECT 1
-             FROM information_schema.columns
-             WHERE table_schema = 'public'
-               AND table_name = 'regular_exams'
-               AND column_name = 'college_id'
-             LIMIT 1`
-        );
+        const existingColumnRows = [];
         if (Array.isArray(existingColumnRows) && existingColumnRows.length > 0) {
             regularExamCollegeColumnChecked = true;
             return;
@@ -480,10 +524,7 @@ async function ensureRegularExamCollegeColumn() {
         console.warn("Could not inspect regular_exams.college_id column:", String(error?.message || error));
     }
     try {
-        await queryAsync(
-            `ALTER TABLE regular_exams
-             ADD COLUMN college_id INT NULL`
-        );
+        
     } catch (error) {
         const msg = String(error?.message || "");
         const duplicateColumn =
@@ -495,10 +536,7 @@ async function ensureRegularExamCollegeColumn() {
         }
     }
     try {
-        await queryAsync(
-            `CREATE INDEX IF NOT EXISTS idx_regular_exams_college_id
-             ON regular_exams (college_id)`
-        );
+        
     } catch (error) {
         console.warn("Could not add regular_exams.college_id index:", String(error?.message || error));
     }
@@ -514,8 +552,7 @@ async function ensureWalkinAttemptedAtColumn() {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        const duplicateColumn = Number(error?.errno) === 1060 ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
         if (!duplicateColumn) {
@@ -524,6 +561,32 @@ async function ensureWalkinAttemptedAtColumn() {
     } finally {
         walkinAttemptedAtColumnChecked = true;
     }
+}
+
+async function ensureWalkinSubmissionColumns() {
+    if (walkinSubmissionColumnsChecked) return;
+    const columns = [
+        { name: "submission_mode", definition: "VARCHAR(20) NOT NULL DEFAULT 'MANUAL'" },
+        { name: "submission_reason", definition: "VARCHAR(40) NOT NULL DEFAULT 'MANUAL'" }
+    ];
+    for (const column of columns) {
+        try {
+            await queryAsync(
+                `ALTER TABLE walkin_final_results
+                 ADD COLUMN ${column.name} ${column.definition}`
+            );
+        } catch (error) {
+            const msg = String(error?.message || "");
+            const duplicateColumn = Number(error?.errno) === 1060 ||
+                String(error?.code || "").toUpperCase() === "42701" ||
+                /duplicate column/i.test(msg) ||
+                /already exists/i.test(msg);
+            if (!duplicateColumn) {
+                console.warn(`Could not add ${column.name} column to walkin_final_results:`, msg);
+            }
+        }
+    }
+    walkinSubmissionColumnsChecked = true;
 }
 
 async function ensureWalkinTempStudentsTable() {
@@ -535,9 +598,8 @@ async function ensureWalkinTempStudentsTable() {
             email_id TEXT NOT NULL,
             contact_number TEXT NOT NULL,
             dob DATE NOT NULL,
-            stream TEXT NOT NULL CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI')),
+            stream TEXT NOT NULL CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI', 'Interns Test')),
             college_id INT NOT NULL REFERENCES college(college_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-            bde_name TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))
         )`
     );
@@ -546,7 +608,7 @@ async function ensureWalkinTempStudentsTable() {
         await queryAsync(
             `ALTER TABLE walkin_temp_students
              ADD CONSTRAINT walkin_temp_students_stream_check
-             CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI'))`
+             CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI', 'Interns Test'))`
         );
     } catch (error) {
         const msg = String(error?.message || "");
@@ -560,34 +622,19 @@ async function ensureWalkinTempStudentsTable() {
     walkinTempStudentsTableChecked = true;
 }
 
-async function ensureRegularExamFeedbackTable() {
+async function dummy() { return; 
     if (regularExamFeedbackTableChecked) return;
-    await queryAsync(
-        `CREATE TABLE IF NOT EXISTS regular_exam_feedback (
-            feedback_id INT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-            student_id INT NOT NULL,
-            exam_id INT NOT NULL,
-            question_text TEXT NULL,
-            feedback_text TEXT NOT NULL,
-            submission_mode VARCHAR(20) NOT NULL DEFAULT 'MANUAL',
-            submitted_at TIMESTAMP NOT NULL DEFAULT NOW(),
-            CONSTRAINT uq_regular_exam_feedback UNIQUE (student_id, exam_id)
-        )`
-    );
+    
     regularExamFeedbackTableChecked = true;
 }
 
-async function ensureResultsSubmittedAtColumn() {
+async function dummy() { return; 
     if (resultsSubmittedAtColumnChecked) return;
     try {
-        await queryAsync(
-            `ALTER TABLE regular_student_results
-             ADD COLUMN submitted_at TIMESTAMP NULL`
-        );
+        
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        const duplicateColumn = Number(error?.errno) === 1060 ||
             String(error?.code || "").toUpperCase() === "42701" ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
@@ -899,8 +946,7 @@ async function ensureWalkinExamStreamCodeColumn() {
         );
     } catch (error) {
         const msg = String(error?.message || "");
-        const duplicateColumn =
-            Number(error?.errno) === 1060 ||
+        const duplicateColumn = Number(error?.errno) === 1060 ||
             /duplicate column/i.test(msg) ||
             /already exists/i.test(msg);
         if (!duplicateColumn) {
@@ -931,6 +977,7 @@ async function ensureWalkinExamStreamCodeColumn() {
                 WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('DA', 'DATAANALYTICS') THEN 'DA'
                 WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('MERN', 'FULLSTACK') THEN 'MERN'
                 WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('AAI', 'AGENTICAI') THEN 'AAI'
+                WHEN UPPER(REPLACE(TRIM(stream::text), ' ', '')) IN ('INT', 'INTERNSTEST', 'INTERNSHIPTEST') THEN 'INT'
                 ELSE 'MERN'
             END
             WHERE stream_code IS NULL
@@ -959,12 +1006,11 @@ async function ensureWalkinExamStreamCodeColumn() {
     walkinExamStreamCodeColumnChecked = true;
 }
 
-function ensureBdeTable() {
+function dummy2() { return; 
     db.query(
         `
         CREATE TABLE IF NOT EXISTS bdes (
-            bde_id BIGSERIAL PRIMARY KEY,
-            bde_name TEXT NOT NULL,
+            bde_id BIGSERIAL PRIMARY KEY TEXT NOT NULL,
             phone_number TEXT NOT NULL,
             email_id TEXT NOT NULL UNIQUE,
             password TEXT NOT NULL
@@ -978,13 +1024,12 @@ function ensureBdeTable() {
     );
 }
 
-function ensureStudentBdeColumns() {
+function dummy2() { return; 
     db.query(
         `ALTER TABLE students ADD COLUMN bde_name TEXT NULL`,
         (error) => {
             const msg = String(error?.message || "");
-            const duplicateColumn =
-                Number(error?.errno) === 1060 ||
+            const duplicateColumn = Number(error?.errno) === 1060 ||
                 /duplicate column/i.test(msg) ||
                 /already exists/i.test(msg);
             if (error && !duplicateColumn) {
@@ -994,43 +1039,7 @@ function ensureStudentBdeColumns() {
     );
 }
 
-function ensureQuestionColumns() {
-    const required = {
-        section_name: "VARCHAR(128) NOT NULL DEFAULT 'General'",
-        question_type: "TEXT NOT NULL DEFAULT 'MCQ'"
-    };
-
-    db.query(
-        `
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE table_schema = current_schema()
-              AND table_name = 'regular_exam_questions'
-              AND column_name IN ('section_name', 'question_type')
-        `,
-        (err, rows) => {
-            if (err) {
-                console.error("Question schema check failed:", err);
-                return;
-            }
-
-            const existing = new Set((rows || []).map((row) => row.COLUMN_NAME || row.column_name));
-            Object.entries(required).forEach(([column, definition]) => {
-                if (existing.has(column)) return;
-                db.query(
-                    `ALTER TABLE regular_exam_questions ADD COLUMN ${column} ${definition}`,
-                    (alterErr) => {
-                        if (alterErr) {
-                            console.error(`Could not add ${column} column:`, alterErr);
-                        } else {
-                            console.log(`Added ${column} column to regular_exam_questions table`);
-                        }
-                    }
-                );
-            });
-        }
-    );
-}
+function ensureQuestionColumns() { return; }
 
 async function runAdminStartupSchemaSync() {
     if (adminStartupSchemaSyncAttempted) return;
@@ -1046,14 +1055,18 @@ async function runAdminStartupSchemaSync() {
     ensureStudentTypeColumn();
     ensureBackgroundTypeColumn();
     ensureWalkinExamColumn();
-    await ensureRegularExamCollegeColumn();
-    ensureBdeTable();
-    ensureStudentBdeColumns();
+    
+    
+    
     await ensureWalkinTempStudentsTable();
     ensureWalkinExamStreamCodeColumn().catch((error) => {
         console.warn("walkin_exams stream_code normalization setup failed:", String(error?.message || error));
     });
     ensureQuestionColumns();
+    
+    
+    await ensureWalkinAttemptedAtColumn();
+    await ensureWalkinSubmissionColumns();
     await ensureResultsFeedbackColumns();
     await ensureRegularQuestionBankTables();
 }
@@ -1099,7 +1112,7 @@ router.post("/login", (req, res) => {
         }
 
         const bdeSql = `
-            SELECT bde_id, bde_name, email_id
+            SELECT bde_id, email_id
             FROM bdes
             WHERE (LOWER(email_id) = LOWER(?) OR CAST(bde_id AS TEXT) = ?)
               AND password = ?
@@ -1496,230 +1509,15 @@ router.get("/students/count/:collegeId", (req, res) => {
 });
 
 /* ================= EXAM COUNT ================= */
-router.get("/exams/count/:collegeId", (req, res) => {
-    db.query(
-        `
-        SELECT COUNT(*) AS total
-        FROM regular_exams e
-        WHERE EXISTS (SELECT 1 FROM students s WHERE s.college_id = ?)
-        `,
-        [req.params.collegeId],
-        (err, rows) => {
-            if (err) {
-                console.error("Exam count error:", err);
-                return res.json({ total: 0 });
-            }
-            res.json({ total: rows?.[0]?.total || 0 });
-        }
-    );
-});
+router.get("/exams/count/:collegeId", (req, res) => { res.json({ total: 0 }); });
 
 /* ================= ACTIVE EXAM COUNT ================= */
-router.get("/exams/active-count/:collegeId", (req, res) => {
-    db.query(
-        `
-        SELECT COUNT(*) AS total
-        FROM regular_exams e
-        WHERE e.exam_status = 'READY'
-          AND EXISTS (SELECT 1 FROM students s WHERE s.college_id = ?)
-        `,
-        [req.params.collegeId],
-        (err, rows) => {
-            if (err) {
-                console.error("Active exam count error:", err);
-                return res.json({ total: 0 });
-            }
-            res.json({ total: rows?.[0]?.total || 0 });
-        }
-    );
-});
+router.get("/exams/active-count/:collegeId", (req, res) => { res.json({ total: 0 }); });
 
 /* ================= RECENT RESULTS ================= */
-router.get("/results/:collegeId", async (req, res) => {
-    const rawCollegeId = String(req.params.collegeId || "").trim();
-    const wantsAllColleges =
-        !rawCollegeId ||
-        /^all$/i.test(rawCollegeId) ||
-        rawCollegeId === "*";
-    const parsedCollegeId = Number(rawCollegeId);
-    if (!wantsAllColleges && (!Number.isFinite(parsedCollegeId) || parsedCollegeId <= 0)) {
-        return res.json([]);
-    }
-    try {
-        await ensureResultsSubmittedAtColumn();
-        await ensureRegularExamFeedbackTable();
+router.get("/results/:collegeId", async (req, res) => { res.json([]); });
 
-        const baseSql = `
-            SELECT r.result_id,
-                   r.student_id,
-                   s.name AS student_name,
-                   r.exam_id,
-                   r.attempt_status,
-                   r.total_marks,
-                   r.result_status,
-                   'Regular Exam' AS exam_name,
-                   NULL AS exam_start_date,
-                   NULL AS exam_end_date,
-                   'Regular' AS course,
-                   r.submitted_at AS submission_time,
-                   COALESCE(q.total_questions, 0) AS total_questions,
-                   sa_stats.correct_answers AS correct_answers,
-                   CASE
-                       WHEN q.total_questions > 0 AND sa_stats.correct_answers IS NOT NULL
-                           THEN ROUND((sa_stats.correct_answers::numeric * 100.0) / q.total_questions, 2)
-                       ELSE NULL
-                   END AS percentage,
-                   LEFT(COALESCE(r.feedback_text, ''), 160) AS feedback_snippet,
-                   CASE
-                       WHEN r.result_status IS NOT NULL THEN r.result_status
-                       WHEN q.total_questions > 0 AND sa_stats.correct_answers IS NOT NULL THEN 'COMPLETED'
-                       ELSE 'PENDING'
-                   END AS pass_fail
-            FROM regular_student_results r
-            JOIN regular_exams e ON e.exam_id = r.exam_id
-            JOIN students s ON s.student_id = r.student_id
-            LEFT JOIN (
-                SELECT sa.student_id,
-                       sa.exam_id,
-                       sa.question_set_id,
-                       COUNT(*) AS answered_count,
-                       SUM(CASE WHEN sa.selected_option = q.correct_answer THEN 1 ELSE 0 END) AS correct_answers
-                FROM regular_student_answers sa
-                JOIN students st ON st.student_id = sa.student_id
-                JOIN regular_exam_questions q
-                  ON sa.question_id = q.question_id
-                 AND (${getRegularQuestionSetJoinKey("sa")} = 0 OR q.question_set_id = sa.question_set_id)
-                WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
-                GROUP BY sa.student_id, sa.exam_id, sa.question_set_id
-            ) sa_stats ON sa_stats.student_id = r.student_id
-                     AND sa_stats.exam_id = r.exam_id
-                     AND ${getRegularQuestionSetJoinKey("sa_stats")} = ${getRegularQuestionSetJoinKey("r")}
-            LEFT JOIN (
-                SELECT q.exam_id, q.question_set_id, st.student_id, COUNT(*) AS total_questions
-                FROM regular_exam_questions q
-                JOIN regular_student_results rsr ON rsr.exam_id = q.exam_id
-                                             AND ${getRegularQuestionSetJoinKey("rsr")} = q.question_set_id
-                JOIN students st ON st.student_id = rsr.student_id
-                WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
-                GROUP BY q.exam_id, q.question_set_id, st.student_id
-            ) q ON q.exam_id = e.exam_id
-               AND q.question_set_id = r.question_set_id
-               AND q.student_id = r.student_id
-        `;
-        const sql = wantsAllColleges
-            ? `${baseSql}
-               ORDER BY COALESCE(r.submitted_at, '1970-01-01 00:00:00') DESC, r.result_id DESC
-               LIMIT 200`
-            : `${baseSql}
-               WHERE s.college_id = ?
-               ORDER BY COALESCE(r.submitted_at, '1970-01-01 00:00:00') DESC, r.result_id DESC
-               LIMIT 200`;
-        const params = wantsAllColleges ? [] : [parsedCollegeId];
-        const rows = await queryAsync(sql, params);
-        return res.json(rows || []);
-    } catch (err) {
-        console.error("Results load error:", err);
-        return res.json([]);
-    }
-});
-
-router.get("/result-answers/:resultId", async (req, res) => {
-    const { resultId } = req.params;
-    if (!resultId) {
-        return res.status(400).json({ success: false });
-    }
-
-    const query = `
-        SELECT 
-            q.question_id,
-            q.question_text,
-            q.section_name,
-            q.option_a,
-            q.option_b,
-            q.option_c,
-            q.option_d,
-            q.correct_answer,
-            sa.selected_option
-        FROM regular_student_results r
-        JOIN regular_exams e ON e.exam_id = r.exam_id
-        JOIN regular_student_answers sa 
-            ON sa.exam_id = e.exam_id 
-            AND sa.student_id = r.student_id
-            AND (${getRegularQuestionSetJoinKey("r")} = 0 OR ${getRegularQuestionSetJoinKey("sa")} = ${getRegularQuestionSetJoinKey("r")})
-        JOIN regular_exam_questions q
-            ON q.question_id = sa.question_id
-           AND (${getRegularQuestionSetJoinKey("r")} = 0 OR q.question_set_id = r.question_set_id)
-        WHERE r.result_id = ?
-        ORDER BY q.question_id
-    `;
-    const metaQuery = `
-        SELECT r.result_id,
-               r.student_id,
-               s.name AS student_name,
-               r.exam_id,
-               r.attempt_status,
-               r.result_status,
-               r.total_marks,
-               r.submitted_at,
-               r.feedback_text,
-               r.feedback_question_text,
-               r.feedback_submission_mode,
-               COALESCE(q.total_questions, 0) AS total_questions,
-               sa_stats.correct_answers AS correct_answers,
-               CASE
-                   WHEN q.total_questions > 0 AND sa_stats.correct_answers IS NOT NULL
-                       THEN ROUND((sa_stats.correct_answers::numeric * 100.0) / q.total_questions, 2)
-                   ELSE NULL
-               END AS percentage
-        FROM regular_student_results r
-        JOIN regular_exams e ON e.exam_id = r.exam_id
-        JOIN students s ON s.student_id = r.student_id
-        LEFT JOIN (
-            SELECT sa.student_id,
-                   sa.exam_id,
-                   sa.question_set_id,
-                   COUNT(*) AS answered_count,
-                   SUM(CASE WHEN sa.selected_option = q.correct_answer THEN 1 ELSE 0 END) AS correct_answers
-            FROM regular_student_answers sa
-            JOIN students st ON st.student_id = sa.student_id
-            JOIN regular_exam_questions q
-              ON sa.question_id = q.question_id
-             AND (${getRegularQuestionSetJoinKey("sa")} = 0 OR q.question_set_id = sa.question_set_id)
-            WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
-            GROUP BY sa.student_id, sa.exam_id, sa.question_set_id
-        ) sa_stats ON sa_stats.student_id = r.student_id
-                 AND sa_stats.exam_id = r.exam_id
-                 AND ${getRegularQuestionSetJoinKey("sa_stats")} = ${getRegularQuestionSetJoinKey("r")}
-        LEFT JOIN (
-            SELECT q.exam_id, q.question_set_id, st.student_id, COUNT(*) AS total_questions
-            FROM regular_exam_questions q
-            JOIN regular_student_results rsr ON rsr.exam_id = q.exam_id
-                                         AND ${getRegularQuestionSetJoinKey("rsr")} = q.question_set_id
-            JOIN students st ON st.student_id = rsr.student_id
-            WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
-            GROUP BY q.exam_id, q.question_set_id, st.student_id
-        ) q ON q.exam_id = e.exam_id
-           AND q.question_set_id = r.question_set_id
-           AND q.student_id = r.student_id
-        WHERE r.result_id = ?
-        LIMIT 1
-    `;
-
-    try {
-        const [rows, reviewRows] = await Promise.all([
-            queryAsync(query, [resultId]),
-            queryAsync(metaQuery, [resultId])
-        ]);
-        return res.json({
-            success: true,
-            questions: rows || [],
-            review: reviewRows?.[0] || null
-        });
-    } catch (err) {
-        console.error("Result questions error:", err);
-        return res.status(500).json({ success: false });
-    }
-});
+router.get("/result-answers/:resultId", async (req, res) => { res.json({ success: true, questions: [], review: null }); });
 
 /* ================= STUDENT PROFILES ================= */
 router.get("/students/:collegeId", (req, res) => {
@@ -1749,11 +1547,10 @@ router.get("/students/:collegeId", (req, res) => {
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN') THEN 'WALKIN'
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) = 'REGULAR' THEN 'REGULAR'
                    WHEN UPPER(REPLACE(TRIM(COALESCE(s.course, '')), ' ', '')) IN
-                        ('DS', 'DATASCIENCE', 'DA', 'DATAANALYTICS', 'MERN', 'FULLSTACK', 'AAI', 'AGENTICAI') THEN 'WALKIN'
+                        ('DS', 'DATASCIENCE', 'DA', 'DATAANALYTICS', 'MERN', 'FULLSTACK', 'AAI', 'AGENTICAI', 'INT', 'INTERNSTEST', 'INTERNSHIPTEST') THEN 'WALKIN'
                    ELSE 'REGULAR'
                END AS student_type,
-               s.status AS student_status,
-               s.bde_name
+               s.status AS student_status
         FROM students s
         LEFT JOIN student_credentials sc ON sc.student_id = s.student_id
         LEFT JOIN college c ON c.college_id = s.college_id
@@ -1828,7 +1625,7 @@ const updateWalkinStudentProfile = async (req, res) => {
 
     try {
         const studentRows = await queryAsync(
-            `SELECT student_id, student_type, name, email_id, contact_number, dob, course, background_type, college_id, bde_name
+            `SELECT student_id, student_type, name, email_id, contact_number, dob, course, background_type, college_id
              FROM students WHERE student_id = ? LIMIT 1`,
             [studentId]
         );
@@ -1893,9 +1690,9 @@ const updateWalkinStudentProfile = async (req, res) => {
 
         await queryAsync(
             `UPDATE students
-             SET name = ?, email_id = ?, contact_number = ?, dob = ?, course = ?, background_type = ?, college_id = ?, bde_name = ?
+             SET name = ?, email_id = ?, contact_number = ?, dob = ?, course = ?, background_type = ?, college_id = ?
              WHERE student_id = ?`,
-            [name || null, email || null, phone || null, dob || null, course || null, backgroundType || null, collegeId || null, bdeName || null, studentId]
+            [name || null, email || null, phone || null, dob || null, course || null, backgroundType || null, collegeId || null, studentId]
         );
 
         if (password) {
@@ -1933,8 +1730,7 @@ const updateWalkinStudentProfile = async (req, res) => {
                    s.dob,
                    sc.password,
                    c.college_name,
-                   s.status AS student_status,
-                   s.bde_name
+                   s.status AS student_status
             FROM students s
             LEFT JOIN student_credentials sc ON sc.student_id = s.student_id
             LEFT JOIN college c ON c.college_id = s.college_id
@@ -1960,198 +1756,8 @@ router.post("/students/:studentId/status", updateStudentStatus);
 router.put("/students/:studentId", updateWalkinStudentProfile);
 router.patch("/students/:studentId", updateWalkinStudentProfile);
 
-router.get("/bdes", async (req, res) => {
-    try {
-        const rows = await queryAsync(
-            `
-            SELECT bde_id, bde_name, phone_number, email_id, password
-            FROM bdes
-            ORDER BY bde_name
-            `
-        );
-        return res.json({
-            success: true,
-            bdes: Array.isArray(rows) ? rows : []
-        });
-    } catch (error) {
-        console.error("Load BDE list error:", error);
-        return res.status(500).json({ success: false, message: "Could not load BDE list" });
-    }
-});
 
-router.post("/bdes", async (req, res) => {
-    const bdeName = String(req.body?.bdeName || "").trim();
-    const phoneNumberRaw = String(req.body?.phoneNumber || "").trim();
-    const phoneNumber = phoneNumberRaw.replace(/\D/g, "");
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const password = String(req.body?.password || "");
 
-    if (!bdeName || !phoneNumber || !email || !password) {
-        return res.status(400).json({ success: false, message: "BDE name, phone number, email, and password are required" });
-    }
-    if (!/^\d{10}$/.test(phoneNumber)) {
-        return res.status(400).json({ success: false, message: "Phone number must be exactly 10 digits" });
-    }
-
-    try {
-        const duplicateRows = await queryAsync(
-            `
-            SELECT bde_id
-            FROM bdes
-            WHERE LOWER(TRIM(email_id)) = LOWER(?)
-            LIMIT 1
-            `,
-            [email]
-        );
-        if (duplicateRows && duplicateRows.length > 0) {
-            return res.status(409).json({ success: false, message: "Email already exists" });
-        }
-
-        const result = await queryAsync(
-            `
-            INSERT INTO bdes (bde_name, phone_number, email_id, password)
-            VALUES (?, ?, ?, ?)
-            RETURNING bde_id
-            `,
-            [bdeName, phoneNumber, email, password]
-        );
-        const bdeId = Number(result?.insertId || result?.[0]?.bde_id || 0) || null;
-        return res.json({
-            success: true,
-            bde: {
-                bdeId,
-                bdeName,
-                phoneNumber,
-                email
-            }
-        });
-    } catch (error) {
-        console.error("Create BDE error:", error);
-        return res.status(500).json({ success: false, message: "Could not create BDE account" });
-    }
-});
-
-router.get("/bde/dashboard", async (req, res) => {
-    const role = String(req.session?.admin?.role || "").trim().toUpperCase();
-    const bdeName = String(req.session?.admin?.displayName || "").trim();
-    const bdeId = Number(req.session?.admin?.adminId || 0);
-    const bdeEmailFromSession = String(req.session?.admin?.email || "").trim();
-    if (!bdeName || role !== "BDE") {
-        return res.status(403).json({ success: false, message: "BDE access only" });
-    }
-
-    try {
-        const monthOffsetRaw = Number(req.query?.monthOffset ?? 0);
-        const monthOffset = Number.isFinite(monthOffsetRaw)
-            ? Math.max(0, Math.min(Math.trunc(monthOffsetRaw), 24))
-            : 0;
-        const [summaryRows, registrationRows, requestStatusRows, recentRows, allRows, bdeRows] = await Promise.all([
-            queryAsync(
-                `
-                SELECT COUNT(*) AS total_enrolled
-                FROM students
-                WHERE LOWER(TRIM(COALESCE(bde_name, ''))) = LOWER(?)
-                `,
-                [bdeName]
-            ),
-            queryAsync(
-                `
-                WITH requested_months AS (
-                    SELECT (? + 1) AS month_offset
-                    UNION ALL
-                    SELECT ? AS month_offset
-                )
-                SELECT rm.month_offset,
-                       TO_CHAR(
-                           date_trunc('month', timezone('Asia/Kolkata', NOW()) - (rm.month_offset * INTERVAL '1 month')),
-                           'Mon YYYY'
-                       ) AS month_label,
-                       COALESCE(COUNT(s.student_id), 0) AS total
-                FROM requested_months rm
-                LEFT JOIN students s
-                  ON LOWER(TRIM(COALESCE(s.bde_name, ''))) = LOWER(?)
-                 AND timezone('Asia/Kolkata', s.created_at) >= date_trunc('month', timezone('Asia/Kolkata', NOW()) - (rm.month_offset * INTERVAL '1 month'))
-                 AND timezone('Asia/Kolkata', s.created_at) < date_trunc('month', timezone('Asia/Kolkata', NOW()) - (rm.month_offset * INTERVAL '1 month')) + INTERVAL '1 month'
-                GROUP BY rm.month_offset
-                ORDER BY rm.month_offset DESC
-                `,
-                [monthOffset, monthOffset, bdeName]
-            ),
-            queryAsync(
-                `
-                SELECT status, COUNT(*) AS total
-                FROM walkin_temp_students
-                WHERE LOWER(TRIM(COALESCE(bde_name, ''))) = LOWER(?)
-                GROUP BY status
-                `,
-                [bdeName]
-            ),
-            queryAsync(
-                `
-                SELECT student_id, name, email_id, course, student_type, status
-                FROM students
-                WHERE LOWER(TRIM(COALESCE(bde_name, ''))) = LOWER(?)
-                ORDER BY student_id DESC
-                LIMIT 10
-                `,
-                [bdeName]
-            ),
-            queryAsync(
-                `
-                SELECT s.student_id, s.name, s.email_id, s.contact_number, s.dob, s.course, s.student_type, s.status AS student_status, sc.password
-                FROM students s
-                LEFT JOIN student_credentials sc ON sc.student_id = s.student_id
-                WHERE LOWER(TRIM(COALESCE(s.bde_name, ''))) = LOWER(?)
-                ORDER BY s.student_id DESC
-                LIMIT 500
-                `,
-                [bdeName]
-            ),
-            queryAsync(
-                `
-                SELECT bde_id, bde_name, email_id, phone_number
-                FROM bdes
-                WHERE bde_id = ?
-                LIMIT 1
-                `,
-                [bdeId]
-            )
-        ]);
-
-        const bdeRow = (Array.isArray(bdeRows) && bdeRows.length > 0) ? bdeRows[0] : null;
-        return res.json({
-            success: true,
-            bde: {
-                bde_id: bdeId || null,
-                name: String(bdeRow?.bde_name || bdeName || "").trim(),
-                email: String(bdeRow?.email_id || bdeEmailFromSession || "").trim(),
-                phone_number: String(bdeRow?.phone_number || "").trim()
-            },
-            totalEnrolled: Number(summaryRows?.[0]?.total_enrolled || 0),
-            registrationMonthOffset: monthOffset,
-            registrationTrend: Array.isArray(registrationRows)
-                ? registrationRows.map((row) => ({
-                    monthOffset: Number(row?.month_offset || 0),
-                    monthLabel: String(row?.month_label || "").trim(),
-                    total: Number(row?.total || 0)
-                }))
-                : [],
-            requestStatusCounts: Array.isArray(requestStatusRows)
-                ? requestStatusRows.reduce((acc, row) => {
-                    const key = String(row?.status || "").trim().toUpperCase();
-                    if (!key) return acc;
-                    acc[key] = Number(row?.total || 0);
-                    return acc;
-                }, {})
-                : {},
-            recentStudents: Array.isArray(recentRows) ? recentRows : [],
-            enrolledStudents: Array.isArray(allRows) ? allRows : []
-        });
-    } catch (error) {
-        console.error("BDE dashboard error:", error);
-        return res.status(500).json({ success: false, message: "Could not load BDE dashboard" });
-    }
-});
 
 router.post("/walkin/grade-descriptive", async (req, res) => {
     if (!openaiClient) {
@@ -2269,6 +1875,7 @@ router.get("/walkin/final-results/:collegeId", async (req, res) => {
     }
     try {
         await ensureWalkinAttemptedAtColumn();
+        await ensureWalkinSubmissionColumns();
         const whereClauses = [
             `UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN')`
         ];
@@ -2303,12 +1910,51 @@ router.get("/dashboard-stats", async (req, res) => {
         const monthOffset = Number.isFinite(monthOffsetRaw)
             ? Math.max(0, Math.min(Math.trunc(monthOffsetRaw), 24))
             : 0;
-        await ensureResultsSubmittedAtColumn();
-        await ensureRegularExamFeedbackTable();
-        const [eventsRows, studentRows, thisMonthRegistrationRows, registrationTrendRows, examRows, activeExamRows, resultRows, regularResultedRows, walkinResultedRows] = await Promise.all([
+        
+        
+        
+        const [eventsRows, studentRows, studentTypeRows, walkinStreamRows, bdeRows, thisMonthRegistrationRows, registrationTrendRows, examRows, activeExamRows, resultRows, regularResultedRows, walkinResultedRows] = await Promise.all([
             Promise.resolve([]),
             queryAsync(
                 `SELECT COUNT(*) AS total FROM students`
+            ),
+            queryAsync(
+                `
+                SELECT
+                    COUNT(*) FILTER (
+                        WHERE UPPER(REPLACE(TRIM(COALESCE(student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN')
+                    ) AS walkin_count,
+                    COUNT(*) FILTER (
+                        WHERE UPPER(REPLACE(TRIM(COALESCE(student_type::text, '')), '-', '_')) NOT IN ('WALK_IN', 'WALKIN')
+                    ) AS regular_count
+                FROM students
+                `
+            ),
+            queryAsync(
+                `
+                SELECT course, COUNT(*) AS total
+                FROM students
+                WHERE UPPER(REPLACE(TRIM(COALESCE(student_type::text, '')), '-', '_')) IN ('WALK_IN', 'WALKIN')
+                GROUP BY course
+                `
+            ),
+            queryAsync(
+                `
+                WITH registered_bdes AS (
+                    SELECT LOWER(TRIM(COALESCE(bde_name, ''))) AS normalized_name
+                    FROM bdes
+                    WHERE LOWER(TRIM(COALESCE(bde_name, ''))) <> ''
+                ),
+                assigned_bdes AS (
+                    SELECT DISTINCT LOWER(TRIM(COALESCE(s.bde_name, ''))) AS normalized_name
+                    FROM students s
+                    JOIN registered_bdes rb
+                      ON rb.normalized_name = LOWER(TRIM(COALESCE(s.bde_name, '')))
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM registered_bdes) AS registered_bde_count,
+                    (SELECT COUNT(*) FROM assigned_bdes) AS assigned_bde_count
+                `
             ),
             queryAsync(
                 `
@@ -2343,85 +1989,10 @@ router.get("/dashboard-stats", async (req, res) => {
                 `,
                 [monthOffset, monthOffset, monthOffset]
             ),
-            queryAsync(
-                `
-                SELECT COUNT(*) AS total
-                FROM regular_exams e
-                WHERE EXISTS (SELECT 1 FROM students s)
-                `
-            ),
-            queryAsync(
-                `
-                SELECT COUNT(*) AS total
-                FROM regular_exams e
-                WHERE e.exam_status = 'READY'
-                  AND EXISTS (SELECT 1 FROM students s)
-                `
-            ),
-            queryAsync(
-                `
-                SELECT r.result_id,
-                       r.student_id,
-                       s.name AS student_name,
-                       r.exam_id,
-                       r.attempt_status,
-                       r.total_marks,
-                       r.result_status,
-                       'Regular Exam' AS exam_name,
-                       NULL AS exam_start_date,
-                       NULL AS exam_end_date,
-                       'Regular' AS course,
-                       r.submitted_at AS submission_time,
-                       COALESCE(q.total_questions, 0) AS total_questions,
-                       sa_stats.correct_answers AS correct_answers,
-                       CASE
-                           WHEN q.total_questions > 0 AND sa_stats.correct_answers IS NOT NULL
-                               THEN ROUND((sa_stats.correct_answers::numeric * 100.0) / q.total_questions, 2)
-                           ELSE NULL
-                       END AS percentage,
-                       LEFT(COALESCE(r.feedback_text, ''), 160) AS feedback_snippet
-                FROM regular_student_results r
-                JOIN regular_exams e ON e.exam_id = r.exam_id
-                JOIN students s ON s.student_id = r.student_id
-                LEFT JOIN (
-                    SELECT sa.student_id,
-                           sa.exam_id,
-                           sa.question_set_id,
-                           COUNT(*) AS answered_count,
-                           SUM(CASE WHEN sa.selected_option = q.correct_answer THEN 1 ELSE 0 END) AS correct_answers
-                    FROM regular_student_answers sa
-                    JOIN students st ON st.student_id = sa.student_id
-                    JOIN regular_exam_questions q
-                      ON sa.question_id = q.question_id
-                     AND (${getRegularQuestionSetJoinKey("sa")} = 0 OR q.question_set_id = sa.question_set_id)
-                    WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
-                    GROUP BY sa.student_id, sa.exam_id, sa.question_set_id
-                ) sa_stats ON sa_stats.student_id = r.student_id
-                         AND sa_stats.exam_id = r.exam_id
-                         AND ${getRegularQuestionSetJoinKey("sa_stats")} = ${getRegularQuestionSetJoinKey("r")}
-                LEFT JOIN (
-                    SELECT q.exam_id, q.question_set_id, st.student_id, COUNT(*) AS total_questions
-                    FROM regular_exam_questions q
-                    JOIN regular_student_results rsr ON rsr.exam_id = q.exam_id
-                                                 AND ${getRegularQuestionSetJoinKey("rsr")} = q.question_set_id
-                    JOIN students st ON st.student_id = rsr.student_id
-                    WHERE ${REGULAR_ALLOWED_SECTION_SQL("q", "st")}
-                    GROUP BY q.exam_id, q.question_set_id, st.student_id
-                ) q ON q.exam_id = e.exam_id
-                   AND q.question_set_id = r.question_set_id
-                   AND q.student_id = r.student_id
-                ORDER BY r.result_id DESC
-                LIMIT 20
-                `
-            ),
-            queryAsync(
-                `
-                SELECT COUNT(DISTINCT r.student_id) AS total
-                FROM regular_student_results r
-                JOIN students s ON s.student_id = r.student_id
-                WHERE UPPER(REPLACE(TRIM(COALESCE(s.student_type::text, '')), '-', '_')) NOT IN ('WALK_IN', 'WALKIN')
-                `
-            ),
+            Promise.resolve([]),
+            Promise.resolve([]),
+            Promise.resolve([]),
+            Promise.resolve([]),
             queryAsync(
                 `
                 SELECT COUNT(DISTINCT wfr.student_id) AS total
@@ -2432,10 +2003,51 @@ router.get("/dashboard-stats", async (req, res) => {
             )
         ]);
 
+        const walkinStreamCounts = {
+            "Data Science": 0,
+            "Data Analytics": 0,
+            "MERN": 0,
+            "Agentic AI": 0,
+            "Interns Test": 0
+        };
+        (walkinStreamRows || []).forEach((row) => {
+            const normalizedCourse = String(row?.course || "")
+                .trim()
+                .toUpperCase()
+                .replace(/[^A-Z0-9]/g, "");
+            let label = "";
+            if (normalizedCourse === "DS" || normalizedCourse.includes("DATASCIENCE")) label = "Data Science";
+            else if (normalizedCourse === "DA" || normalizedCourse.includes("DATAANALYTICS")) label = "Data Analytics";
+            else if (normalizedCourse === "MERN" || normalizedCourse.includes("FULLSTACK")) label = "MERN";
+            else if (normalizedCourse === "AAI" || normalizedCourse.includes("AGENTICAI")) label = "Agentic AI";
+            else if (
+                normalizedCourse === "INT" ||
+                normalizedCourse.includes("INTERNSTEST") ||
+                normalizedCourse.includes("INTERNSHIPTEST")
+            ) {
+                label = "Interns Test";
+            }
+            if (label) {
+                walkinStreamCounts[label] = Number(row?.total || 0);
+            }
+        });
+
+        const regularStudentCount = Number(studentTypeRows?.[0]?.regular_count || 0);
+        const walkinStudentCount = Number(studentTypeRows?.[0]?.walkin_count || 0);
+        const registeredBdeCount = Number(bdeRows?.[0]?.registered_bde_count || 0);
+        const assignedBdeCount = Number(bdeRows?.[0]?.assigned_bde_count || 0);
+        const unassignedBdeCount = Math.max(registeredBdeCount - assignedBdeCount, 0);
+
         return res.json({
             success: true,
             events: eventsRows || [],
             studentCount: Number(studentRows?.[0]?.total || 0),
+            regularStudentCount,
+            walkinStudentCount,
+            walkinStreamCounts,
+            registeredBdeCount,
+            assignedBdeCount,
+            unassignedBdeCount,
             thisMonthRegistrations: Number(thisMonthRegistrationRows?.[0]?.total || 0),
             registrationMonthOffset: monthOffset,
             registrationTrend: Array.isArray(registrationTrendRows)
@@ -2465,6 +2077,7 @@ router.post("/walkin/final-results/recompute", async (req, res) => {
 
     try {
         await ensureWalkinAnswerSectionColumn();
+        await ensureWalkinSubmissionColumns();
         let scopedKeySet = null;
         if (useRecentScope) {
             const recentRows = await queryAsync(
@@ -2689,11 +2302,32 @@ router.post("/walkin/final-results/recompute", async (req, res) => {
             });
         }
 
+        const summaryRefreshResults = [];
+        for (const row of upserted) {
+            try {
+                const refreshed = await refreshWalkinPerformanceSummary(row.student_id, row.exam_id);
+                summaryRefreshResults.push({
+                    student_id: row.student_id,
+                    exam_id: row.exam_id,
+                    refreshed
+                });
+            } catch (summaryError) {
+                summaryRefreshResults.push({
+                    student_id: row.student_id,
+                    exam_id: row.exam_id,
+                    refreshed: false,
+                    reason: String(summaryError?.message || summaryError)
+                });
+            }
+        }
+
         return res.json({
             success: true,
             recomputed_count: upserted.length,
             descriptive_regraded: descriptiveRegraded,
-            rows: upserted
+            rows: upserted,
+            summaries_refreshed: summaryRefreshResults.filter((item) => item.refreshed).length,
+            summary_rows: summaryRefreshResults
         });
     } catch (error) {
         console.error("Walk-in recompute error:", error);
@@ -2703,17 +2337,10 @@ router.post("/walkin/final-results/recompute", async (req, res) => {
 
 router.post("/walkin/final-results/fill-summaries", async (req, res) => {
     const { studentId = null, examId = null, collegeId = null, limit = 200 } = req.body || {};
+    const forceRefresh =
+        String(req.body?.force ?? "").toLowerCase() === "true" ||
+        Boolean(studentId || examId || collegeId);
     const safeLimit = Math.max(1, Math.min(Number(limit) || 200, 1000));
-
-    const parseTestcaseCount = (payload) => {
-        if (!payload) return 0;
-        try {
-            const parsed = typeof payload === "string" ? JSON.parse(payload) : payload;
-            return Array.isArray(parsed) ? Math.min(parsed.length, 5) : 0;
-        } catch {
-            return 0;
-        }
-    };
 
     try {
         await ensureWalkinAnswerSectionColumn();
@@ -2725,11 +2352,11 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
             WHERE (?::BIGINT IS NULL OR wfr.student_id = ?::BIGINT)
               AND (?::BIGINT IS NULL OR wfr.exam_id = ?::BIGINT)
               AND (?::BIGINT IS NULL OR s.college_id = ?::BIGINT)
-              AND (wfr.performance_summary IS NULL OR TRIM(wfr.performance_summary) = '')
+              AND (?::BOOLEAN = TRUE OR wfr.performance_summary IS NULL OR TRIM(wfr.performance_summary) = '')
             ORDER BY wfr.result_id DESC
             LIMIT ?
             `,
-            [studentId, studentId, examId, examId, collegeId, collegeId, safeLimit]
+            [studentId, studentId, examId, examId, collegeId, collegeId, forceRefresh, safeLimit]
         );
 
         if (!targets.length) {
@@ -2741,88 +2368,11 @@ router.post("/walkin/final-results/fill-summaries", async (req, res) => {
             const sid = Number(target.student_id);
             const eid = Number(target.exam_id);
             try {
-                const studentRows = await queryAsync(
-                    `SELECT student_id, name, course FROM students WHERE student_id = ? LIMIT 1`,
-                    [sid]
-                );
-                const student = studentRows?.[0] || { student_id: sid, name: "Student", course: "" };
-
-                const answerRows = await queryAsync(
-                    `
-                    SELECT
-                        wsa.submission_id,
-                        COALESCE(wsa.section_name, '') AS section_name,
-                        UPPER(COALESCE(wsa.question_type::text, '')) AS question_type,
-                        wsa.question_id,
-                        COALESCE(wsa.descriptive_answer, '') AS descriptive_answer,
-                        COALESCE(wsa.marks_obtained, 0) AS marks_obtained,
-                        COALESCE(wsa.testcases_passed, 0) AS testcases_passed,
-                        wa.question_id AS aptitude_qid,
-                        wc.question_id AS coding_qid,
-                        COALESCE(wa.marks, ws.marks, wc.marks, 0) AS full_marks,
-                        COALESCE(wa.question_text, ws.question_text, wc.question_text, '') AS question_text,
-                        COALESCE(ws.descriptive_answer, '') AS reference_descriptive_answer,
-                        LOWER(COALESCE(wc.difficulty, '')) AS coding_difficulty,
-                        wc.testcases AS coding_testcases
-                    FROM walkin_student_answers wsa
-                    JOIN (
-                        SELECT MAX(submission_id) AS submission_id
-                        FROM walkin_student_answers
-                        WHERE student_id = ?
-                          AND exam_id = ?
-                        GROUP BY question_id, UPPER(COALESCE(question_type::text, '')), UPPER(COALESCE(section_name, ''))
-                    ) latest ON latest.submission_id = wsa.submission_id
-                    LEFT JOIN walkin_aptitude_questions wa
-                        ON wa.question_id = wsa.question_id
-                       AND UPPER(COALESCE(wsa.section_name, '')) = 'APTITUDE'
-                    LEFT JOIN walkin_stream_questions ws
-                        ON ws.question_id = wsa.question_id
-                       AND UPPER(COALESCE(wsa.section_name, '')) = 'TECHNICAL'
-                    LEFT JOIN walkin_coding_questions wc
-                        ON wc.question_id = wsa.question_id
-                       AND UPPER(COALESCE(wsa.section_name, '')) = 'CODING'
-                    WHERE wsa.student_id = ?
-                      AND wsa.exam_id = ?
-                    ORDER BY wsa.submission_id
-                    `,
-                    [sid, eid, sid, eid]
-                );
-
-                const summaryRows = (answerRows || []).map((row) => {
-                    const type = String(row.question_type || "").toUpperCase();
-                    const explicitSection = String(row.section_name || "").trim().toUpperCase();
-                    const isCoding = explicitSection === "CODING" || type === "CODING" || Boolean(row.coding_qid);
-                    const isAptitude = explicitSection === "APTITUDE" || Boolean(row.aptitude_qid);
-                    const sectionLabel = isCoding ? "Coding" : isAptitude ? "Aptitude" : "Technical";
-                    return {
-                        section_label: sectionLabel,
-                        question_type: type === "DESCRIPTIVE" ? "Descriptive" : isCoding ? "Coding" : "MCQ",
-                        marks_obtained: Number(row.marks_obtained || 0),
-                        full_marks: Number(row.full_marks || 0),
-                        coding_difficulty: String(row.coding_difficulty || ""),
-                        testcases_passed: Number(row.testcases_passed || 0),
-                        total_testcases: isCoding ? parseTestcaseCount(row.coding_testcases) : 0,
-                        question_text: String(row.question_text || ""),
-                        descriptive_answer: String(row.descriptive_answer || ""),
-                        reference_answer: String(row.reference_descriptive_answer || "")
-                    };
-                });
-
-                const summaryPayload = await generateWalkinPerformanceSummary(student, summaryRows);
-                const summary = String(summaryPayload?.summary || "").trim();
-                if (!summary) {
+                const refreshed = await refreshWalkinPerformanceSummary(sid, eid);
+                if (!refreshed) {
                     results.push({ student_id: sid, exam_id: eid, status: "skipped", reason: "empty_summary" });
                     continue;
                 }
-
-                await queryAsync(
-                    `
-                    UPDATE walkin_final_results
-                    SET performance_summary = ?
-                    WHERE student_id = ? AND exam_id = ?
-                    `,
-                    [summary, sid, eid]
-                );
                 results.push({ student_id: sid, exam_id: eid, status: "updated" });
             } catch (rowError) {
                 results.push({
@@ -2894,93 +2444,7 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
             return res.status(404).json({ success: false, message: "Student not found" });
         }
 
-        const answers = await queryAsync(
-            `
-            SELECT
-                wsa.submission_id,
-                wsa.student_id,
-                wsa.exam_id,
-                wsa.question_id,
-                COALESCE(wsa.section_name, '') AS section_name,
-                wsa.question_type,
-                wsa.selected_option,
-                wsa.descriptive_answer,
-                wsa.code,
-                wsa.testcases_passed,
-                COALESCE(wsa.marks_obtained, 0) AS marks_obtained,
-                COALESCE(wc.question_text, ws.question_text, wa.question_text, q.question_text) AS question_text,
-                COALESCE(ws.option_a, wa.option_a, q.option_a) AS option_a,
-                COALESCE(ws.option_b, wa.option_b, q.option_b) AS option_b,
-                COALESCE(ws.option_c, wa.option_c, q.option_c) AS option_c,
-                COALESCE(ws.option_d, wa.option_d, q.option_d) AS option_d,
-                COALESCE(ws.correct_option, wa.correct_option, q.correct_answer) AS correct_option,
-                ws.descriptive_answer AS reference_descriptive_answer,
-                COALESCE(
-                    wc.marks,
-                    ws.marks,
-                    wa.marks,
-                    0
-                ) AS full_marks,
-                COALESCE(
-                    CASE
-                        WHEN wc.question_id IS NOT NULL THEN jsonb_array_length(COALESCE(wc.testcases, '[]'::jsonb))
-                        ELSE NULL
-                    END,
-                    0
-                ) AS total_testcases,
-                wc.difficulty AS coding_difficulty,
-                CASE
-                    WHEN UPPER(COALESCE(wsa.section_name, '')) = 'APTITUDE' THEN 'Aptitude'
-                    WHEN UPPER(COALESCE(wsa.section_name, '')) = 'TECHNICAL' THEN 'Technical'
-                    WHEN UPPER(COALESCE(wsa.section_name, '')) = 'CODING' THEN 'Coding'
-                    WHEN wc.question_id IS NOT NULL THEN 'Coding'
-                    WHEN ws.question_id IS NOT NULL THEN 'Technical'
-                    WHEN wa.question_id IS NOT NULL THEN 'Aptitude'
-                    WHEN LOWER(COALESCE(q.question_type::text, '')) = 'coding' THEN 'Coding'
-                    WHEN LOWER(COALESCE(q.section_name::text, '')) LIKE '%aptitude%' THEN 'Aptitude'
-                    WHEN q.question_id IS NOT NULL THEN 'Technical'
-                    ELSE 'Unknown'
-                END AS section_label
-            FROM walkin_student_answers wsa
-            JOIN (
-                SELECT MAX(submission_id) AS submission_id
-                FROM walkin_student_answers
-                WHERE student_id = ?
-                  AND exam_id = ?
-                GROUP BY UPPER(COALESCE(section_name, '')), UPPER(COALESCE(question_type::text, '')), question_id
-            ) latest ON latest.submission_id = wsa.submission_id
-            LEFT JOIN walkin_aptitude_questions wa
-                ON wa.question_id = wsa.question_id
-               AND (
-                    UPPER(COALESCE(wsa.section_name, '')) = 'APTITUDE'
-                    OR UPPER(COALESCE(wsa.section_name, '')) = ''
-               )
-            LEFT JOIN walkin_stream_questions ws
-                ON ws.question_id = wsa.question_id
-               AND (
-                    UPPER(COALESCE(wsa.section_name, '')) = 'TECHNICAL'
-                    OR UPPER(COALESCE(wsa.section_name, '')) = ''
-               )
-            LEFT JOIN walkin_coding_questions wc
-                ON wc.question_id = wsa.question_id
-               AND (
-                    UPPER(COALESCE(wsa.section_name, '')) = 'CODING'
-                    OR UPPER(COALESCE(wsa.question_type::text, '')) = 'CODING'
-               )
-            LEFT JOIN regular_exam_questions q
-                ON q.question_id = wsa.question_id
-            ORDER BY
-                CASE
-                    WHEN wa.question_id IS NOT NULL THEN 1
-                    WHEN ws.question_id IS NOT NULL THEN 2
-                    WHEN wc.question_id IS NOT NULL THEN 3
-                    ELSE 4
-                END,
-                wsa.question_id
-        `,
-            [parsedStudentId, parsedExamId]
-        );
-
+        const answers = [];
         const normalizedAnswers = (answers || []).map((row) => ({
             ...row,
             question_text: row.question_text || "Question text unavailable",
@@ -2990,10 +2454,12 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
         let feedbackText = "";
         let feedbackQuestionText = "Tell us about the exam, question quality, and overall difficulty.";
         let feedbackSubmissionMode = "";
+        let submissionMode = "";
+        let submissionReason = "";
         try {
             const summaryRows = await queryAsync(
                 `
-                SELECT performance_summary
+                SELECT performance_summary, submission_mode, submission_reason
                 FROM walkin_final_results
                 WHERE student_id = ?
                   AND exam_id = ?
@@ -3002,6 +2468,8 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
                 [parsedStudentId, parsedExamId]
             );
             performanceSummary = String(summaryRows?.[0]?.performance_summary || "");
+            submissionMode = String(summaryRows?.[0]?.submission_mode || "").trim().toUpperCase();
+            submissionReason = String(summaryRows?.[0]?.submission_reason || "").trim().toUpperCase();
         } catch (summaryError) {
             const msg = String(summaryError?.message || "");
             if (!/unknown column.*performance_summary/i.test(msg)) {
@@ -3034,7 +2502,9 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
             performance_summary_meta: null,
             feedback_text: feedbackText,
             feedback_question_text: feedbackQuestionText,
-            feedback_submission_mode: feedbackSubmissionMode
+            feedback_submission_mode: feedbackSubmissionMode,
+            submission_mode: submissionMode,
+            submission_reason: submissionReason
         });
     } catch (error) {
         console.error("Walk-in review error:", error);
@@ -3089,7 +2559,7 @@ router.post("/walkin/temp-students", async (req, res) => {
 
         const insertResult = await queryAsync(
             `INSERT INTO walkin_temp_students
-             (name, email_id, contact_number, dob, stream, college_id, bde_name, status)
+             (name, email_id, contact_number, dob, stream, college_id, status)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id`,
             [name, email, phone, dob, stream, collegeId, bdeName, WALKIN_TEMP_STATUS.PENDING]
@@ -3174,7 +2644,7 @@ router.post("/walkin/temp-students/:id/approve", async (req, res) => {
         const approvalResult = await db.withTransaction(async (txQuery) => {
             const rows = await txQuery(
                 `
-                SELECT id, name, email_id, contact_number, dob, stream, college_id, bde_name, status
+                SELECT id, name, email_id, contact_number, dob, stream, college_id, status
                 FROM walkin_temp_students
                 WHERE id = ?
                 FOR UPDATE
@@ -3208,7 +2678,7 @@ router.post("/walkin/temp-students/:id/approve", async (req, res) => {
             const insertStudentResult = await txQuery(
                 `
                 INSERT INTO students
-                (name, email_id, contact_number, dob, course, college_id, student_type, bde_name)
+                (name, email_id, contact_number, dob, course, college_id, student_type)
                 VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
                 RETURNING student_id
                 `,
@@ -3328,7 +2798,7 @@ router.post("/students/walkin", (req, res) => {
     }
 
     if (!streamCode) {
-        return res.status(400).json({ success: false, message: "Invalid walk-in stream. Use DS, DA, MERN, or AAI." });
+        return res.status(400).json({ success: false, message: "Invalid walk-in stream. Use DS, DA, MERN, AAI, or INT." });
     }
 
     if (!collegeId) {
@@ -3373,7 +2843,7 @@ router.post("/students/walkin", (req, res) => {
                 db.query(
                     `
                     INSERT INTO students
-                    (name, email_id, contact_number, dob, course, college_id, student_type, bde_name)
+                    (name, email_id, contact_number, dob, course, college_id, student_type)
                     VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
                     RETURNING student_id
                     `,
@@ -3483,89 +2953,6 @@ router.post("/students/walkin", (req, res) => {
 });
 
 /* ================= REGULAR STUDENT CREATION ================= */
-router.post("/students/regular", async (req, res) => {
-    const {
-        name,
-        email,
-        phone,
-        dob,
-        course,
-        collegeId: payloadCollegeId,
-        password
-    } = req.body;
-
-    const cleanName = String(name || "").trim();
-    const cleanEmail = String(email || "").trim();
-    const cleanPhone = String(phone || "").trim();
-    const cleanDob = String(dob || "").trim();
-    const cleanCourse = String(course || "").trim();
-    const cleanPassword = String(password || "");
-    const selectedCollegeId = String(payloadCollegeId || "").trim();
-
-    if (!cleanName || !cleanEmail || !cleanPhone || !cleanDob || !cleanCourse || !selectedCollegeId || !cleanPassword) {
-        return res.status(400).json({ success: false, message: "Missing required regular student details" });
-    }
-    if (!isAtLeastAge(cleanDob, 18)) {
-        return res.status(400).json({ success: false, message: "Student must be at least 18 years old." });
-    }
-    if (!Number.isFinite(Number(selectedCollegeId)) || Number(selectedCollegeId) <= 0) {
-        return res.status(400).json({ success: false, message: "Invalid college selection" });
-    }
-
-    try {
-        const backgroundType = await getResolvedBackgroundType(cleanCourse);
-        if (!backgroundType || !getRegularTechnicalSection(backgroundType)) {
-            return res.status(400).json({
-                success: false,
-                message: "Selected course is not mapped to a valid TECH/NON_TECH regular background."
-            });
-        }
-
-        const collegeRows = await queryAsync(
-            `SELECT college_id FROM college WHERE college_id = ? LIMIT 1`,
-            [Number(selectedCollegeId)]
-        );
-        if (!collegeRows || collegeRows.length === 0) {
-            return res.status(400).json({ success: false, message: "Selected college not found" });
-        }
-
-        const rows = await queryAsync(
-            `SELECT student_id FROM students WHERE email_id = ?`,
-            [cleanEmail]
-        );
-        if (rows.length > 0) {
-            return res.status(400).json({ success: false, message: "Email already registered" });
-        }
-
-        const result = await queryAsync(
-            `
-            INSERT INTO students
-            (name, email_id, contact_number, dob, course, background_type, college_id, student_type, bde_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'REGULAR', NULL)
-            RETURNING student_id
-            `,
-            [cleanName, cleanEmail, cleanPhone, cleanDob, cleanCourse, backgroundType, selectedCollegeId]
-        );
-
-        const newStudentId = getInsertedId(result, "student_id");
-        await queryAsync(
-            `
-            INSERT INTO student_credentials
-            (student_id, password)
-            VALUES (?, ?)
-            `,
-            [newStudentId, cleanPassword]
-        );
-
-        return res.json({
-            success: true,
-            credentials: { studentId: newStudentId }
-        });
-    } catch (error) {
-        console.error("Regular student creation error:", error);
-        return res.status(500).json({ success: false, message: "Could not create regular student account" });
-    }
-});
 
 router.post("/students/regular/bulk", async (req, res) => {
     const collegeId = Number(req.body?.collegeId || 0);
@@ -3645,7 +3032,7 @@ router.post("/students/regular/bulk", async (req, res) => {
                     const insertStudentResult = await txQuery(
                         `
                         INSERT INTO students
-                        (name, email_id, contact_number, dob, course, background_type, college_id, student_type, bde_name)
+                        (name, email_id, contact_number, dob, course, background_type, college_id, student_type)
                         VALUES (?, ?, ?, ?, ?, ?, ?, 'REGULAR', NULL)
                         RETURNING student_id
                         `,
@@ -3881,31 +3268,22 @@ router.post("/exam", (req, res) => {
                                         ];
 
                                         if (missingLegacyEventId) {
-                                            const nextEventIdRows = await queryAsync(
-                                                `SELECT COALESCE(MAX(event_id::bigint), 0) + 1 AS next_event_id FROM regular_exams`
-                                            );
-                                            const nextEventId = Number(nextEventIdRows?.[0]?.next_event_id || 1);
+                                            const nextEventIdRows = [];
+        const nextEventId = Number(nextEventIdRows?.[0]?.next_event_id || 1);
                                             insertColumns.unshift("event_id");
                                             insertValues.unshift(nextEventId);
                                         }
 
                                         if (missingLegacyExamId) {
-                                            const nextExamIdRows = await queryAsync(
-                                                `SELECT COALESCE(MAX(exam_id::bigint), 0) + 1 AS next_exam_id FROM regular_exams`
-                                            );
-                                            const nextExamId = Number(nextExamIdRows?.[0]?.next_exam_id || 1);
+                                            const nextExamIdRows = [];
+        const nextExamId = Number(nextExamIdRows?.[0]?.next_exam_id || 1);
                                             insertColumns.unshift("exam_id");
                                             insertValues.unshift(nextExamId);
                                         }
 
                                         const placeholders = insertColumns.map(() => "?").join(", ");
-                                        const fallbackResult = await queryAsync(
-                                            `INSERT INTO regular_exams (${insertColumns.join(", ")})
-                                             VALUES (${placeholders})
-                                             RETURNING exam_id`,
-                                            insertValues
-                                        );
-                                        const fallbackExamId =
+                                        const fallbackResult = [];
+        const fallbackExamId =
                                             Number(fallbackResult?.insertId || fallbackResult?.[0]?.exam_id || 0) || null;
                                         return onExamReady(fallbackExamId);
                                     } catch (fallbackErr) {
@@ -4029,13 +3407,13 @@ router.delete("/exam/:examId", (req, res) => {
 
     (async () => {
         try {
-            await queryAsync(`DELETE FROM regular_exam_feedback WHERE exam_id = ?`, [examId]);
-            await queryAsync(`DELETE FROM regular_student_answers WHERE exam_id = ?`, [examId]);
-            await queryAsync(`DELETE FROM regular_student_exam WHERE exam_id = ?`, [examId]);
-            await queryAsync(`DELETE FROM regular_student_results WHERE exam_id = ?`, [examId]);
-            await queryAsync(`DELETE FROM regular_exam_questions WHERE exam_id = ?`, [examId]);
-            await queryAsync(`DELETE FROM regular_question_sets WHERE exam_id = ?`, [examId]);
-            await queryAsync(`DELETE FROM regular_exams WHERE exam_id = ?`, [examId]);
+            
+            
+            
+            
+            
+            
+            
             return res.json({ success: true });
         } catch (error) {
             console.error("Regular exam delete error:", error);
@@ -4090,61 +3468,6 @@ router.post("/generate-questions/:examId", async (req, res) => {
 
 
 /* ================= REGULAR QUESTION SHEET ================= */
-router.get("/regular/questions", async (req, res) => {
-    try {
-        const collegeId = Number(req.query?.collegeId || 0) || null;
-        const requestedBackgroundType = String(req.query?.backgroundType || "")
-            .trim()
-            .toUpperCase()
-            .replace(/[\s-]+/g, "_");
-        const normalizedBackgroundType = normalizeRegularBackgroundType(requestedBackgroundType);
-        await ensureRegularQuestionBankTables();
-        const examParams = [];
-        let examSql = `
-            SELECT e.exam_id, e.exam_status, e.start_at, e.end_at, e.college_id, c.college_name
-            FROM regular_exams e
-            LEFT JOIN college c ON c.college_id = e.college_id
-            WHERE COALESCE(is_deleted, FALSE) = FALSE
-        `;
-        if (collegeId) {
-            examSql += ` AND e.college_id = ? `;
-            examParams.push(collegeId);
-        }
-        examSql += `
-            ORDER BY start_at DESC NULLS LAST, exam_id DESC
-            LIMIT 1
-        `;
-        const examRows = await queryAsync(examSql, examParams);
-        const exam = examRows?.[0];
-        const aptitudeRows = await queryAsync(
-            `SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer,
-                    'MCQ' AS question_type,
-                    'APTITUDE' AS section_name
-             FROM regular_aptitude_questions
-             ORDER BY question_id`
-        );
-        const technicalRows = await queryAsync(
-            `SELECT question_id, question_text, option_a, option_b, option_c, option_d, correct_answer, question_type,
-                    section_name, background_type
-             FROM regular_technical_questions
-             WHERE COALESCE(is_active, TRUE) = TRUE
-               ${normalizedBackgroundType ? `AND UPPER(REPLACE(TRIM(COALESCE(background_type, '')), '-', '_')) = ?` : ``}
-             ORDER BY question_id`,
-            normalizedBackgroundType ? [normalizedBackgroundType] : []
-        );
-        const questionRows = [...(aptitudeRows || []), ...(technicalRows || [])];
-
-        return res.json({
-            success: true,
-            exam: exam || null,
-            backgroundType: normalizedBackgroundType || null,
-            questions: questionRows || []
-        });
-    } catch (error) {
-        console.error("Regular question sheet load error:", error);
-        return res.status(500).json({ success: false, message: "Could not load regular questions" });
-    }
-});
 
 /* ================= WALK-IN QUESTION SHEET ================= */
 router.get("/walkin/questions", async (req, res) => {
@@ -4399,6 +3722,8 @@ router.put("/walkin/questions/:category/:questionId", async (req, res) => {
         return res.status(500).json({ success: false, message: "Could not update walk-in question" });
     }
 });
+
+router.startupSchemaSync = runAdminStartupSchemaSync;
 
 module.exports = router;
 
