@@ -180,6 +180,8 @@ const sendIndex = (res) => {
     if (hasReactBuild) {
         return res.sendFile(path.join(reactDist, "index.html"));
     }
+    return res.status(404).send("Frontend build not found");
+};
 
 const requireAdminPage = (req, res, next) => {
     if (req.session?.admin) {

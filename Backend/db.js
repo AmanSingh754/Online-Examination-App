@@ -34,7 +34,7 @@ const pool = new Pool({
     ssl: usePgSsl ? { rejectUnauthorized } : false,
     max: Number(process.env.PG_POOL_MAX || 10),
     idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
-    connectionTimeoutMillis: pgConnectTimeoutMs,
+    connectionTimeoutMillis: 15000,
     query_timeout: pgQueryTimeoutMs,
     keepAlive: true,
     keepAliveInitialDelayMillis: pgKeepAliveDelayMs

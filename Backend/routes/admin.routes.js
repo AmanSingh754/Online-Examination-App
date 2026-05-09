@@ -1111,35 +1111,7 @@ router.post("/login", (req, res) => {
             });
         }
 
-        const bdeSql = `
-            SELECT bde_id, email_id
-            FROM bdes
-            WHERE (LOWER(email_id) = LOWER(?) OR CAST(bde_id AS TEXT) = ?)
-              AND password = ?
-        `;
-        db.query(bdeSql, [loginInput, loginInput, password], (bdeErr, bdeRows) => {
-            if (bdeErr) {
-                console.error("BDE login error:", bdeErr);
-                return res.json({ success: false });
-            }
-            if (!bdeRows || bdeRows.length === 0) {
-                return res.json({ success: false });
-            }
-
-            req.session.admin = {
-                adminId: bdeRows[0].bde_id,
-                role: "BDE",
-                email: bdeRows[0].email_id,
-                displayName: bdeRows[0].bde_name
-            };
-            return res.json({
-                success: true,
-                adminId: bdeRows[0].bde_id,
-                role: "BDE",
-                email: bdeRows[0].email_id,
-                displayName: bdeRows[0].bde_name
-            });
-        });
+        return res.json({ success: false, message: "Invalid credentials" });
     });
 });
 router.post("/logout", (req, res) => {
@@ -1938,24 +1910,7 @@ router.get("/dashboard-stats", async (req, res) => {
                 GROUP BY course
                 `
             ),
-            queryAsync(
-                `
-                WITH registered_bdes AS (
-                    SELECT LOWER(TRIM(COALESCE(bde_name, ''))) AS normalized_name
-                    FROM bdes
-                    WHERE LOWER(TRIM(COALESCE(bde_name, ''))) <> ''
-                ),
-                assigned_bdes AS (
-                    SELECT DISTINCT LOWER(TRIM(COALESCE(s.bde_name, ''))) AS normalized_name
-                    FROM students s
-                    JOIN registered_bdes rb
-                      ON rb.normalized_name = LOWER(TRIM(COALESCE(s.bde_name, '')))
-                )
-                SELECT
-                    (SELECT COUNT(*) FROM registered_bdes) AS registered_bde_count,
-                    (SELECT COUNT(*) FROM assigned_bdes) AS assigned_bde_count
-                `
-            ),
+            Promise.resolve([]),
             queryAsync(
                 `
                 SELECT COUNT(*) AS total
@@ -1989,6 +1944,9 @@ router.get("/dashboard-stats", async (req, res) => {
                 `,
                 [monthOffset, monthOffset, monthOffset]
             ),
+            Promise.resolve([]),
+            Promise.resolve([]),
+            Promise.resolve([]),
             Promise.resolve([]),
             Promise.resolve([]),
             Promise.resolve([]),
