@@ -68,7 +68,7 @@ function AdminLogin() {
     <div className="landing-shell">
       <header className="landing-header">
         <div className="brand">
-          <img className="brand-logo" src="/assets/rp2-official.png" alt="App logo" />
+          <img className="brand-logo" src="/assets/app-logo.png" alt="App logo" />
           <span className="brand-text">Online Examination App</span>
         </div>
         <nav className="landing-nav">
