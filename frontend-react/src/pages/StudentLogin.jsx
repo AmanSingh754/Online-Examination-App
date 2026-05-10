@@ -1,5 +1,5 @@
-﻿import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 
 function StudentLogin() {
@@ -80,16 +80,14 @@ function StudentLogin() {
           <span className="brand-text">Online Examination App</span>
         </div>
         <nav className="landing-nav">
-          <a href="/" className="nav-link">Student Home</a>
-          <a
-            href="#"
+          <Link to="/" className="nav-link">Student Home</Link>
+          <Link
+            to="/register"
             className="nav-link"
-            aria-disabled="true"
-            onClick={(event) => event.preventDefault()}
           >
             Register
-          </a>
-          <a className="nav-cta" href="/student/login">Login</a>
+          </Link>
+          <Link className="nav-cta" to="/student/login">Login</Link>
         </nav>
       </header>
 
@@ -162,7 +160,7 @@ function StudentLogin() {
           {error && <p className="auth-help">{error}</p>}
           {!error && (
             <p className="auth-help">
-              Need an account? Contact your admin. Self-registration is closed.
+              Need an account? <a href="/register">Register here</a> for walk-in exams.
             </p>
           )}
         </section>

@@ -258,6 +258,11 @@ body.bde-landing .auth-card {
     align-items: center;
 }
 
+.hero-copy {
+    position: relative;
+    z-index: 10;
+}
+
 .hero-copy h1 {
     font-size: clamp(38px, 4.8vw, 56px);
     margin: 8px 0 14px;
@@ -333,6 +338,8 @@ body.bde-landing .auth-card {
     min-height: 360px;
     display: grid;
     place-items: center;
+    pointer-events: none;
+    z-index: 1;
 }
 
 .device {

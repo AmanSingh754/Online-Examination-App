@@ -598,9 +598,10 @@ async function ensureWalkinTempStudentsTable() {
             email_id TEXT NOT NULL,
             contact_number TEXT NOT NULL,
             dob DATE NOT NULL,
-            stream TEXT NOT NULL CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI', 'Interns Test')),
+            stream TEXT NOT NULL,
             college_id INT NOT NULL REFERENCES college(college_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-            status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))
+            status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
+            bde_name TEXT NULL
         )`
     );
     try {
@@ -608,7 +609,7 @@ async function ensureWalkinTempStudentsTable() {
         await queryAsync(
             `ALTER TABLE walkin_temp_students
              ADD CONSTRAINT walkin_temp_students_stream_check
-             CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI', 'Interns Test'))`
+             CHECK (stream IN ('Data Analytics', 'Data Science', 'MERN', 'Agentic AI', 'Interns Test', 'Interns Test (DA)', 'Interns Test (DS)', 'Interns Test (MERN)', 'Interns Test (AAI)'))`
         );
     } catch (error) {
         const msg = String(error?.message || "");
@@ -844,6 +845,38 @@ function ensureWalkinExamColumn() {
     });
 }
 
+function ensureBdeNameColumn() {
+    const query = `
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE table_schema = current_schema()
+          AND table_name = 'students'
+          AND column_name = 'bde_name'
+    `;
+
+    db.query(query, (err, rows) => {
+        if (err) {
+            console.error("bde_name column check failed:", err);
+            return;
+        }
+
+        if (rows?.length > 0) {
+            return;
+        }
+
+        db.query(
+            `ALTER TABLE students ADD COLUMN bde_name TEXT NULL`,
+            err2 => {
+                if (err2) {
+                    console.error("Could not add bde_name column:", err2);
+                } else {
+                    console.log("Added bde_name column to students table");
+                }
+            }
+        );
+    });
+}
+
 function ensureBackgroundTypeColumn() {
     const query = `
         SELECT COLUMN_NAME
@@ -1054,6 +1087,7 @@ async function runAdminStartupSchemaSync() {
 
     ensureStudentTypeColumn();
     ensureBackgroundTypeColumn();
+    ensureBdeNameColumn();
     ensureWalkinExamColumn();
     
     
@@ -2517,7 +2551,7 @@ router.post("/walkin/temp-students", async (req, res) => {
 
         const insertResult = await queryAsync(
             `INSERT INTO walkin_temp_students
-             (name, email_id, contact_number, dob, stream, college_id, status)
+             (name, email_id, contact_number, dob, stream, college_id, bde_name, status)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              RETURNING id`,
             [name, email, phone, dob, stream, collegeId, bdeName, WALKIN_TEMP_STATUS.PENDING]
@@ -2636,7 +2670,7 @@ router.post("/walkin/temp-students/:id/approve", async (req, res) => {
             const insertStudentResult = await txQuery(
                 `
                 INSERT INTO students
-                (name, email_id, contact_number, dob, course, college_id, student_type)
+                (name, email_id, contact_number, dob, course, college_id, student_type, bde_name)
                 VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
                 RETURNING student_id
                 `,
@@ -2801,7 +2835,7 @@ router.post("/students/walkin", (req, res) => {
                 db.query(
                     `
                     INSERT INTO students
-                    (name, email_id, contact_number, dob, course, college_id, student_type)
+                    (name, email_id, contact_number, dob, course, college_id, student_type, bde_name)
                     VALUES (?, ?, ?, ?, ?, ?, 'WALK_IN', ?)
                     RETURNING student_id
                     `,

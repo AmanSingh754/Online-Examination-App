@@ -118,11 +118,59 @@ router.post("/login", (req, res) => {
 });
 
 /* ================= STUDENT REGISTER API ================= */
-router.post("/register", (_req, res) => {
-    return res.status(403).json({
-        success: false,
-        message: "Student self-registration is closed. Contact your admin for account creation."
-    });
+const { isAtLeastAge } = require("../utils/ageValidation");
+
+router.post("/register", async (req, res) => {
+    const name = String(req.body?.name || "").trim();
+    const email = String(req.body?.email || "").trim();
+    const phone = String(req.body?.phone || "").trim();
+    const dob = String(req.body?.dob || "").trim();
+    const stream = String(req.body?.stream || "").trim();
+    const collegeId = Number(req.body?.collegeId || 0);
+
+    if (!name || !email || !phone || !dob || !stream || !collegeId) {
+        return res.status(400).json({ success: false, message: "Missing required registration details" });
+    }
+
+    if (!isAtLeastAge(dob, 18)) {
+        return res.status(400).json({ success: false, message: "Student must be at least 18 years old." });
+    }
+
+    try {
+        // 1. Check if student already exists in main students table
+        const [existingStudent] = await db.query(
+            `SELECT student_id FROM students WHERE LOWER(TRIM(email_id)) = LOWER(?) LIMIT 1`,
+            [email]
+        );
+        if (existingStudent && existingStudent.length > 0) {
+            return res.status(400).json({ success: false, message: "Email already registered." });
+        }
+
+        // 2. Check if a pending request already exists
+        const [pendingRequest] = await db.query(
+            `SELECT id FROM walkin_temp_students WHERE LOWER(TRIM(email_id)) = LOWER(?) AND status = 'PENDING' LIMIT 1`,
+            [email]
+        );
+        if (pendingRequest && pendingRequest.length > 0) {
+            return res.status(400).json({ success: false, message: "A pending registration request already exists for this email." });
+        }
+
+        // 3. Insert into walkin_temp_students
+        await db.query(
+            `INSERT INTO walkin_temp_students 
+             (name, email_id, contact_number, dob, stream, college_id, status, bde_name) 
+             VALUES (?, ?, ?, ?, ?, ?, 'PENDING', 'SELF-REGISTERED')`,
+            [name, email, phone, dob, stream, collegeId]
+        );
+
+        return res.json({ 
+            success: true, 
+            message: "Registration request submitted successfully. Please wait for admin approval. You will be able to login once approved." 
+        });
+    } catch (error) {
+        console.error("Student self-registration error:", error);
+        return res.status(500).json({ success: false, message: "Internal server error during registration." });
+    }
 });
 
 router.get("/colleges", (req, res) => {

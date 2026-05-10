@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import useBodyClass from "../hooks/useBodyClass.js";
 
 function Home() {
@@ -13,7 +14,7 @@ function Home() {
         <nav className="landing-nav">
           <a href="#" className="nav-link">About</a>
           <a href="#" className="nav-link">Eligibility</a>
-          <a href="#" className="nav-link">Exam Day</a>
+          <Link to="/register" className="nav-link">Register</Link>
           <a href="#" className="nav-link">Results</a>
           <a className="nav-cta" href="/student/login">Student Login</a>
         </nav>
@@ -26,18 +27,17 @@ function Home() {
             <h1>Start your walk-in examination journey with one trusted portal.</h1>
             <p className="hero-subtitle">
               Access your walk-in exam account, track your exam schedule, and review results from one portal.
-              Student accounts are provisioned directly by admin.
+              Register yourself for an upcoming walk-in session below.
             </p>
             <div className="hero-actions">
               <a className="button-primary" href="/student/login">Login as Student</a>
-              <a
+              <Link
                 className="button-ghost"
-                href="#"
-                aria-disabled="true"
-                onClick={(event) => event.preventDefault()}
+                to="/register"
+                style={{ cursor: "pointer", display: "inline-block" }}
               >
                 Register Now
-              </a>
+              </Link>
             </div>
           </div>
           <div className="hero-art" />
