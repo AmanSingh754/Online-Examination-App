@@ -129,6 +129,7 @@ function StudentDashboard() {
       navigate(query);
     } catch (err) {
       console.error("Start exam error:", err);
+      alert("A network error occurred. Please check your connection and try again.");
     } finally {
       setStartingExamId(null);
     }

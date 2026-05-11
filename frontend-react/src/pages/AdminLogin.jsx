@@ -52,10 +52,6 @@ function AdminLogin() {
       localStorage.setItem("adminRole", String(data.role || "ADMIN").toUpperCase());
       localStorage.setItem("adminDisplayName", data.displayName || data.email || "");
       localStorage.setItem("adminEmail", data.email || email || "");
-      if (String(data.role || "").toUpperCase() === "BDE") {
-        navigate("/bde/dashboard");
-        return;
-      }
       navigate("/admin/dashboard");
     } catch (err) {
       console.error("Admin login error:", err);

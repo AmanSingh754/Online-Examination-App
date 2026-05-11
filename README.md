@@ -2,147 +2,104 @@
 
 This repository contains a full-stack examination platform with separate flows for:
 
-- regular students
-- walk-in students
-- admins
-- BDE users
+- Regular students (Bulk uploaded by Admin)
+- Walk-in students (Self-registration with Admin approval)
+- Administrators
 
-The current app uses a Node.js/Express backend in `Backend` and a React + Vite frontend in `frontend-react`. A legacy static frontend also exists in `Frontend`, but the active UI work is in the React app.
+The system is built with a Node.js/Express backend (`Backend`) and a modern React + Vite frontend (`frontend-react`).
 
 ## Features
 
-- admin and BDE dashboards
-- regular and walk-in student registration
-- bulk regular student upload through XLSX
-- regular and walk-in exam flows
-- coding, MCQ, and descriptive question handling
-- walk-in result review and report export
-- Agentic AI stream support
-- post-exam feedback collection
+- **Admin Dashboard**: Manage students, approve registrations, and monitor exam events.
+- **Walk-in Registration**: Students can register themselves; accounts remain `PENDING` until approved by an admin.
+- **Bulk Upload**: Admin can upload regular students using XLSX templates.
+- **Dynamic Question Banking**: Support for Aptitude, Technical (Stream-based), and Coding questions.
+- **Proctoring**: Basic full-screen enforcement and violation tracking.
+- **AI Integration**: Support for automated summary generation and grading (OpenAI/Azure OpenAI).
+- **Result Export**: Detailed result reports available in Excel format.
 
 ## Tech Stack
 
-- Backend: Node.js, Express, PostgreSQL
-- Frontend: React, Vite
-- Auth/session: `express-session`
-- LLM integrations: OpenAI / Azure OpenAI support in backend services
-- File export/import: `xlsx`
+- **Backend**: Node.js, Express, PostgreSQL
+- **Frontend**: React 18, Vite, Vanilla CSS
+- **Authentication**: Session-based (`express-session`)
+- **Library Dependencies**: `xlsx` for reports, `pg` for database, `dotenv` for configuration.
 
 ## Project Structure
 
 ```text
-Backend/          Express server, routes, DB layer, LLM helpers
-frontend-react/   Active React frontend
-Frontend/         Legacy static frontend
-run-portal.ps1    Simple build-and-run script
-Dockerfile
-docker-compose.yml
+Backend/          Express server, routes, database models, and LLM services.
+frontend-react/   The active React application (Vite-based).
+Frontend/         Legacy static HTML/JS frontend (for reference).
+run-portal.ps1    PowerShell helper script for build and execution.
+Dockerfile        Containerization support.
 ```
 
 ## Prerequisites
 
-- Node.js installed
-- npm installed
-- PostgreSQL reachable with the values configured in `Backend/.env`
+- Node.js (v18+)
+- npm or yarn
+- PostgreSQL instance (Running and accessible)
 
-## Environment
+## Configuration
 
-The backend reads configuration from `Backend/.env`.
+The backend requires a `.env` file in the `Backend/` directory. See `Backend/.env.example` (if available) or ensure the following variables are set:
 
-Minimum required backend settings:
+- `SESSION_SECRET`: A strong unique key for session encryption.
+- `PG_HOST`, `PG_PORT`, `PG_USER`, `PG_PASSWORD`, `PG_DATABASE`: PostgreSQL connection details.
+- `PORT`: Port for the backend server (defaults to 5000).
 
-- `SESSION_SECRET`
-- `PG_HOST`
-- `PG_PORT`
-- `PG_USER`
-- `PG_PASSWORD`
-- `PG_DATABASE`
+## Installation
 
-Optional AI-related settings are also present in the backend for summary and grading flows.
+1. **Install Frontend Dependencies**:
+   ```bash
+   cd frontend-react
+   npm install
+   ```
 
-## Install
+2. **Install Backend Dependencies**:
+   ```bash
+   cd ../Backend
+   npm install
+   ```
 
-From the project root:
+## Running the Application
 
-```powershell
-cd "c:\Users\Aman\OneDrive - iDataLytics LLC\Desktop\EXAM PORTAL - Copy"
-```
-
-Install frontend dependencies:
-
-```powershell
-cd frontend-react
-npm install
-cd ..
-```
-
-Install backend dependencies:
-
-```powershell
-cd Backend
-npm install
-cd ..
-```
-
-## Run
-
-### Option 1: Use the helper script
-
-This builds the React frontend and starts the backend server:
-
+### Option 1: Automated Script (Windows/PowerShell)
 ```powershell
 .\run-portal.ps1
 ```
 
-### Option 2: Run manually
+### Option 2: Manual Start
+1. **Build the Frontend**:
+   ```bash
+   cd frontend-react
+   npm run build
+   ```
+2. **Start the Backend**:
+   ```bash
+   cd ../Backend
+   node server.js
+   ```
 
-Build the frontend:
+## Usage
 
-```powershell
-cd frontend-react
-npm run build
-cd ..
-```
+Once the server is running, access the portal at:
+`http://localhost:5000`
 
-Start the backend:
-
-```powershell
-node Backend/server.js
-```
-
-## Local URL
-
-Once the backend is running, open:
-
-```text
-http://localhost:5000
-```
-
-The backend serves the built React app from `frontend-react/dist`.
+The backend automatically serves the production build of the React app from `frontend-react/dist`.
 
 ## Useful Scripts
 
-Backend smoke scripts:
-
-```powershell
-cd Backend
-npm run smoke:regular
-npm run smoke:walkin
-```
-
-Frontend production build:
-
-```powershell
-cd frontend-react
-npm run build
-```
+- **Backend Smoke Tests**: `npm run smoke:regular` or `npm run smoke:walkin` (inside `Backend/`).
+- **Frontend Development**: `npm run dev` (inside `frontend-react/`) to run with HMR on port 3000.
 
 ## Notes
 
-- Student result visibility is currently disabled in the student-facing flow. After submission, students are redirected back to the dashboard instead of seeing marks.
-- The repo currently contains environment secrets in `Backend/.env`. If this repository is shared publicly, those values should be rotated.
-- `Frontend/` is kept for older static pages, but active changes should go into `frontend-react/`.
+- **Registration Flow**: New walk-in students must be approved in the Admin Dashboard before they can log in.
+- **Static Content**: The `Frontend/` folder is legacy and is not used by the main application server.
+- **Security**: Always rotate `SESSION_SECRET` and database credentials before production deployment.
 
-## GitHub
-
-If this project is pushed to a separate repository branch, verify that you are viewing the correct branch on GitHub. For example, if code is pushed to `main-import`, the default `main` page may still show only the older placeholder content until you switch branches or merge it.
+## Author
+Aman Kumar Singh
+🔗 GitHub: [AmanSingh754](https://github.com/AmanSingh754)

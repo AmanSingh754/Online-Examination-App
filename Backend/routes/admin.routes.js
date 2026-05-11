@@ -381,7 +381,6 @@ const createAndActivateRegularQuestionSet = async (examId) => {
 
 const getCurrentRole = (req) => String(req.session?.admin?.role || "").trim().toUpperCase();
 const isAdminUser = (req) => getCurrentRole(req) === "ADMIN";
-const isBdeUser = (req) => getCurrentRole(req) === "BDE";
 
 const buildWalkinAutoPassword = (name, dob) => {
     const normalizedName = String(name || "")
@@ -1087,7 +1086,6 @@ async function runAdminStartupSchemaSync() {
 
     ensureStudentTypeColumn();
     ensureBackgroundTypeColumn();
-    ensureBdeNameColumn();
     ensureWalkinExamColumn();
     
     
@@ -1203,55 +1201,30 @@ router.post("/account/change-password", async (req, res) => {
     }
 
     try {
-        if (role === "ADMIN") {
-            const adminRows = await queryAsync(
-                `
-                SELECT admin_id
-                FROM admins
-                WHERE admin_id = ? AND password = ?
-                LIMIT 1
-                `,
-                [accountId, currentPassword]
-            );
-            if (!Array.isArray(adminRows) || adminRows.length === 0) {
-                return res.status(400).json({ success: false, message: "Current password is incorrect" });
-            }
-            await queryAsync(
-                `
-                UPDATE admins
-                SET password = ?
-                WHERE admin_id = ?
-                `,
-                [newPassword, accountId]
-            );
-            return res.json({ success: true, message: "Password updated successfully" });
+        if (role !== "ADMIN") {
+            return res.status(403).json({ success: false, message: "Only admin users can change passwords" });
         }
-
-        if (role === "BDE") {
-            const bdeRows = await queryAsync(
-                `
-                SELECT bde_id
-                FROM bdes
-                WHERE bde_id = ? AND password = ?
-                LIMIT 1
-                `,
-                [accountId, currentPassword]
-            );
-            if (!Array.isArray(bdeRows) || bdeRows.length === 0) {
-                return res.status(400).json({ success: false, message: "Current password is incorrect" });
-            }
-            await queryAsync(
-                `
-                UPDATE bdes
-                SET password = ?
-                WHERE bde_id = ?
-                `,
-                [newPassword, accountId]
-            );
-            return res.json({ success: true, message: "Password updated successfully" });
+        const adminRows = await queryAsync(
+            `
+            SELECT admin_id
+            FROM admins
+            WHERE admin_id = ? AND password = ?
+            LIMIT 1
+            `,
+            [accountId, currentPassword]
+        );
+        if (!Array.isArray(adminRows) || adminRows.length === 0) {
+            return res.status(400).json({ success: false, message: "Current password is incorrect" });
         }
-
-        return res.status(403).json({ success: false, message: "Unsupported account role" });
+        await queryAsync(
+            `
+            UPDATE admins
+            SET password = ?
+            WHERE admin_id = ?
+            `,
+            [newPassword, accountId]
+        );
+        return res.json({ success: true, message: "Password updated successfully" });
     } catch (error) {
         console.error("Account password change error:", error);
         return res.status(500).json({ success: false, message: "Could not update password" });
@@ -1919,7 +1892,7 @@ router.get("/dashboard-stats", async (req, res) => {
         
         
         
-        const [eventsRows, studentRows, studentTypeRows, walkinStreamRows, bdeRows, thisMonthRegistrationRows, registrationTrendRows, examRows, activeExamRows, resultRows, regularResultedRows, walkinResultedRows] = await Promise.all([
+        const [eventsRows, studentRows, studentTypeRows, walkinStreamRows, thisMonthRegistrationRows, registrationTrendRows, examRows, activeExamRows, resultRows, regularResultedRows, walkinResultedRows] = await Promise.all([
             Promise.resolve([]),
             queryAsync(
                 `SELECT COUNT(*) AS total FROM students`
@@ -2026,9 +1999,6 @@ router.get("/dashboard-stats", async (req, res) => {
 
         const regularStudentCount = Number(studentTypeRows?.[0]?.regular_count || 0);
         const walkinStudentCount = Number(studentTypeRows?.[0]?.walkin_count || 0);
-        const registeredBdeCount = Number(bdeRows?.[0]?.registered_bde_count || 0);
-        const assignedBdeCount = Number(bdeRows?.[0]?.assigned_bde_count || 0);
-        const unassignedBdeCount = Math.max(registeredBdeCount - assignedBdeCount, 0);
 
         return res.json({
             success: true,
@@ -2037,9 +2007,6 @@ router.get("/dashboard-stats", async (req, res) => {
             regularStudentCount,
             walkinStudentCount,
             walkinStreamCounts,
-            registeredBdeCount,
-            assignedBdeCount,
-            unassignedBdeCount,
             thisMonthRegistrations: Number(thisMonthRegistrationRows?.[0]?.total || 0),
             registrationMonthOffset: monthOffset,
             registrationTrend: Array.isArray(registrationTrendRows)
@@ -2506,9 +2473,6 @@ router.get("/walkin/review/:collegeId/:studentId/:examId", async (req, res) => {
 
 /* ================= WALK-IN TEMP STUDENT REQUESTS ================= */
 router.post("/walkin/temp-students", async (req, res) => {
-    if (!isBdeUser(req)) {
-        return res.status(403).json({ success: false, message: "Only BDE users can register walk-in requests" });
-    }
 
     const name = String(req.body?.name || "").trim();
     const email = String(req.body?.email || "").trim();
@@ -2516,9 +2480,7 @@ router.post("/walkin/temp-students", async (req, res) => {
     const dob = String(req.body?.dob || "").trim();
     const stream = normalizeWalkinStreamLabel(req.body?.stream);
     const collegeId = Number(req.body?.collegeId || 0);
-    const bdeName = String(req.session?.admin?.displayName || "").trim();
-
-    if (!name || !email || !phone || !dob || !stream || !collegeId || !bdeName) {
+    if (!name || !email || !phone || !dob || !stream || !collegeId) {
         return res.status(400).json({ success: false, message: "Missing required walk-in details" });
     }
     if (!isAtLeastAge(dob, 18)) {

@@ -211,7 +211,8 @@ export default function Exam() {
     .trim()
     .toUpperCase()
     .replace(/[\s-]/g, "_");
-  const isWalkinExamSession = true;
+  const isWalkinExamSession =
+    storedStudentType === "WALKIN" || storedStudentType === "WALK_IN";
   const examApiBase = "/exam";
 
   const [questionBank, setQuestionBank] = useState([]);
@@ -580,6 +581,7 @@ export default function Exam() {
           return;
         }
         questionsLoadedRef.current = true;
+        console.log(`[DEBUG] Loaded ${data.length} questions for exam ${examId}`);
         setQuestionBank(data);
       })
       .catch((err) => {

@@ -590,18 +590,6 @@ const isDataAnalyticsStream = (value) => {
     normalized === "AGENTICAI"
   );
 };
-const getWalkinStreamLabel = (value) => {
-  const normalized = String(value || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
-  if (normalized === "DS" || normalized.includes("DATASCIENCE")) return "Data Science";
-  if (normalized === "DA" || normalized.includes("DATAANALYTICS")) return "Data Analytics";
-  if (normalized === "MERN" || normalized.includes("FULLSTACK")) return "MERN";
-  if (normalized === "AAI" || normalized.includes("AGENTICAI")) return "Agentic AI";
-  if (normalized === "INT" || normalized.includes("INTERNSTEST") || normalized.includes("INTERNSHIPTEST")) return "Interns Test";
-  return "";
-};
 const isWalkinStudentRow = (student) => {
   const typeNormalized = String(student?.student_type || "")
     .trim()
@@ -652,9 +640,6 @@ function AdminDashboard() {
       return acc;
     }, {})
   );
-  const [dashboardRegisteredBdeCount, setDashboardRegisteredBdeCount] = useState(0);
-  const [dashboardAssignedBdeCount, setDashboardAssignedBdeCount] = useState(0);
-  const [dashboardUnassignedBdeCount, setDashboardUnassignedBdeCount] = useState(0);
   const [registrationMonthOffset, setRegistrationMonthOffset] = useState(0);
   const [registrationTrend, setRegistrationTrend] = useState([]);
   const [regularResultedCount, setRegularResultedCount] = useState(0);
@@ -674,9 +659,7 @@ function AdminDashboard() {
     phone: "",
     dob: "",
     stream: "",
-    collegeId: "",
-    bdeName: "",
-    bdeNameOther: ""
+    collegeId: ""
   });
   const [walkinCreateOpen, setWalkinCreateOpen] = useState(false);
   const [walkinStatus, setWalkinStatus] = useState("");
@@ -753,12 +736,6 @@ function AdminDashboard() {
   const [walkinResultsExportStatus, setWalkinResultsExportStatus] = useState("");
   const [bdeStudentsSearch, setBdeStudentsSearch] = useState("");
   const [bdeStudentsBdeFilter, setBdeStudentsBdeFilter] = useState("ALL");
-  const [bdeStudentsCourseFilter, setBdeStudentsCourseFilter] = useState("ALL");
-  const [bdeStudentsStatusFilter, setBdeStudentsStatusFilter] = useState("ALL");
-  const [bdeAccountsSearch, setBdeAccountsSearch] = useState("");
-  const [regularStudentsSearch, setRegularStudentsSearch] = useState("");
-  const [regularStudentsCourseFilter, setRegularStudentsCourseFilter] = useState("ALL");
-  const [regularResultsSearch, setRegularResultsSearch] = useState("");
   const [examListSearch, setExamListSearch] = useState("");
   const examListStatusFilter = "ALL";
   const [studentProfilesSearch, setStudentProfilesSearch] = useState("");
@@ -771,15 +748,6 @@ function AdminDashboard() {
   const [newCollegeName, setNewCollegeName] = useState("");
   const [collegeActionStatus, setCollegeActionStatus] = useState("");
   const [collegeCreateSubmitting, setCollegeCreateSubmitting] = useState(false);
-  const [newBdeForm, setNewBdeForm] = useState({
-    bdeName: "",
-    phoneNumber: "",
-    email: "",
-    password: ""
-  });
-  const [allowBdeManualInput, setAllowBdeManualInput] = useState(false);
-  const [bdeActionStatus, setBdeActionStatus] = useState("");
-  const [bdeCreateSubmitting, setBdeCreateSubmitting] = useState(false);
   const [editingCollegeId, setEditingCollegeId] = useState(null);
   const [editingCollegeName, setEditingCollegeName] = useState("");
 
@@ -794,18 +762,8 @@ function AdminDashboard() {
     password: ""
   });
   const [regularStatus, setRegularStatus] = useState("");
-  const [regularCredentials, setRegularCredentials] = useState(null);
   const [regularCreateSubmitting, setRegularCreateSubmitting] = useState(false);
   const [regularBulkCollegeId, setRegularBulkCollegeId] = useState("");
-  const [regularBulkRows, setRegularBulkRows] = useState([]);
-  const [regularBulkFileName, setRegularBulkFileName] = useState("");
-  const [regularBulkStatus, setRegularBulkStatus] = useState("");
-  const [regularBulkSubmitting, setRegularBulkSubmitting] = useState(false);
-  const [regularBulkResult, setRegularBulkResult] = useState(null);
-  const [collegeOptions, setCollegeOptions] = useState([]);
-  const [collegeError, setCollegeError] = useState("");
-  const [bdeOptions, setBdeOptions] = useState([]);
-  const [bdeError, setBdeError] = useState("");
   const [examCreateSubmitting, setExamCreateSubmitting] = useState(false);
   const [examScheduleStatus, setExamScheduleStatus] = useState("");
   const [editingExamId, setEditingExamId] = useState(null);
@@ -1122,9 +1080,6 @@ function AdminDashboard() {
         ...prev,
         ...(data.walkinStreamCounts || {})
       }));
-      setDashboardRegisteredBdeCount(Number(data.registeredBdeCount || 0));
-      setDashboardAssignedBdeCount(Number(data.assignedBdeCount || 0));
-      setDashboardUnassignedBdeCount(Number(data.unassignedBdeCount || 0));
       setRegistrationTrend(Array.isArray(data.registrationTrend) ? data.registrationTrend : []);
       setRegularResultedCount(Number(data.regularResultedCount || 0));
       setWalkinResultedCount(Number(data.walkinResultedCount || 0));
@@ -2449,12 +2404,6 @@ function AdminDashboard() {
       loadCollegeList();
     }
   }, [activeSection, collegeOptions.length, loadCollegeList]);
-
-  useEffect(() => {
-    if ((activeSection === "walkin" || activeSection === "regular" || activeSection === "business-executives") && bdeOptions.length === 0) {
-      loadBdes();
-    }
-  }, [activeSection, bdeOptions.length, loadBdes]);
 
   useEffect(() => {
     if (activeSection === "create-exam" && exams.length === 0) {

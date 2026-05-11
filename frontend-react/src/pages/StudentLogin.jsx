@@ -52,6 +52,7 @@ function StudentLogin() {
       }
 
       // ÃƒÂ¢Ã…â€œÃ¢â‚¬Â¦ SET FRESH LOGIN DATA
+      console.log("[DEBUG] Student login success:", data);
       localStorage.setItem("studentId", data.studentId);
       localStorage.setItem("studentName", data.name);
       localStorage.setItem("studentEmail", data.email || email);

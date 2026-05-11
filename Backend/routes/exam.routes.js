@@ -1539,6 +1539,7 @@ router.post("/start", async (req, res) => {
 
     try {
         if (isWalkinSessionStudent(req)) {
+            console.log(`[DEBUG] Walk-in start attempt: studentId=${studentId}, examId=${examId}`);
             const walkinRows = await queryAsync(
                 `SELECT walkin_exam_id FROM walkin_exams WHERE walkin_exam_id = ? LIMIT 1`,
                 [examId]
@@ -1553,6 +1554,7 @@ router.post("/start", async (req, res) => {
             const student = studentRows?.[0] || {};
             const isActive = String(student.status || "").trim().toUpperCase() === "ACTIVE";
             if (!isActive) {
+                console.log(`[DEBUG] Walk-in start failed: Student ${studentId} is NOT active (status: ${student.status})`);
                 return res.status(403).json({ success: false, message: "Forbidden" });
             }
             if (!isWalkinStudentType(student.student_type)) {
@@ -1565,6 +1567,7 @@ router.post("/start", async (req, res) => {
             const examStreamCode = normalizeWalkinStreamStrict(examRows?.[0]?.stream || "");
             const studentStreamCode = normalizeWalkinStreamStrict(student.course || "");
             if (!examStreamCode || !studentStreamCode || examStreamCode !== studentStreamCode) {
+                console.log(`[DEBUG] Walk-in start failed: Stream mismatch. Student(${student.course})->${studentStreamCode} vs Exam(${examRows?.[0]?.stream})->${examStreamCode}`);
                 return res.status(403).json({ success: false, message: "Forbidden" });
             }
             await ensureWalkinStudentExamTable();
@@ -1878,6 +1881,7 @@ router.get("/regular_exam_questions/:examId", (req, res) => {
 
             if (walkinExamRows && walkinExamRows.length > 0) {
                 const walkinExam = walkinExamRows[0];
+                console.log(`[DEBUG] regular_exam_questions (walk-in): examId=${examIdNum}, stream=${walkinExam.stream}`);
                 const sessionAssignedWalkinExamId = Number(req.session?.student?.walkinExamId || 0);
                 const enforceAssignmentAndLoad = (proceed) => {
                     if (sessionAssignedWalkinExamId > 0) {
